@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ball vs Ball: Arena Physics</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- MAIN MENU -->
+  <div class="screen active" id="menuScreen">
+    <div class="title-logo">BALL vs BALL</div>
+    <div class="subtitle">ARENA PHYSICS</div>
+    <div class="menu-buttons">
+      <button class="btn btn-play" id="btnPlay">▶ CHƠI 2 NGƯỜI</button>
+      <button class="btn btn-play" id="btnPlayAI">🤖 ĐẤU VỚI MÁY</button>
+      <button class="btn" id="btnGallery">📖 BALL GALLERY</button>
+    </div>
+    <div class="small-note">32 loại bóng • 4 đấu trường • Vật lý va chạm đàn hồi thời gian thực</div>
+  </div>
+
+  <!-- MAP SELECT -->
+  <div class="screen" id="mapScreen">
+    <div class="section-title">CHỌN ĐẤU TRƯỜNG</div>
+    <div class="map-grid" id="mapGrid"></div>
+    <div class="nav-row">
+      <button class="btn" id="mapBack">← Quay lại</button>
+      <button class="btn btn-play" id="mapNext">Tiếp tục →</button>
+    </div>
+  </div>
+
+  <!-- BALL SELECT -->
+  <div class="screen" id="ballScreen">
+    <div class="section-title">CHỌN BÓNG CHIẾN ĐẤU</div>
+    <div class="select-wrap">
+      <div class="glass player-panel p1-panel">
+        <h3>PLAYER 1</h3>
+        <div class="group-tabs compact" id="p1Tabs"></div>
+        <div class="ball-pick-grid" id="p1Grid"></div>
+        <div class="picked-summary glass" id="p1Summary">Chưa chọn bóng</div>
+      </div>
+      <div class="glass player-panel p2-panel">
+        <h3>PLAYER 2</h3>
+        <div id="p2AiHint" style="display:none;font-size:.65rem;color:var(--text-1);text-align:center;margin-bottom:6px;">🤖 Máy đã chọn ngẫu nhiên — bấm vào ô khác để đổi bóng cho AI</div>
+        <div class="group-tabs compact" id="p2Tabs"></div>
+        <div class="ball-pick-grid" id="p2Grid"></div>
+        <div class="picked-summary glass" id="p2Summary">Chưa chọn bóng</div>
+      </div>
+    </div>
+    <div class="nav-row">
+      <button class="btn" id="ballBack">← Quay lại</button>
+      <button class="btn btn-play" id="ballNext">Vào trận →</button>
+    </div>
+  </div>
+
+  <!-- GAME SCREEN -->
+  <div class="screen" id="gameScreen">
+    <div id="gameWrap">
+      <div id="hud">
+        <div class="hp-block glass hp-p1">
+          <div class="hp-name"><span class="ball-icon-badge" id="p1Badge"></span><span id="p1NameLbl">P1</span><span id="p1HpText" style="margin-left:auto;font-weight:700;font-size:.75rem;"></span></div>
+          <div class="hp-meter"><span class="hp-type-icon" id="p1HpTypeIcon" aria-hidden="true">❤</span><div class="hp-bar-outer"><div class="hp-bar-inner" id="p1HpBar" style="width:100%"></div></div></div>
+        </div>
+        <div class="hp-block glass hp-p2 right">
+          <div class="hp-name"><span id="p2HpText" style="font-weight:700;font-size:.75rem;"></span><span id="p2NameLbl">P2</span><span class="ball-icon-badge" id="p2Badge"></span></div>
+          <div class="hp-meter"><span class="hp-type-icon" id="p2HpTypeIcon" aria-hidden="true">❤</span><div class="hp-bar-outer"><div class="hp-bar-inner" id="p2HpBar" style="width:100%"></div></div></div>
+        </div>
+      </div>
+      <div class="center-status glass" id="statusBar">Kéo bóng để ngắm — PLAYER 1</div>
+      <div id="canvasHost">
+        <canvas id="gameCanvas"></canvas>
+        <div id="roundMsg" class="glass"></div>
+      </div>
+      <div id="bottomBar">
+        <button class="btn" id="btnMenu">☰ Menu chính</button>
+        <button class="btn" id="btnRematch" style="display:none;">↻ Đấu lại</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- BALL GALLERY MODAL -->
+  <div class="modal-backdrop" id="galleryModal">
+    <div class="modal-box glass">
+      <div class="modal-header">
+        <h2>📖 BALL GALLERY</h2>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button class="btn" id="galleryModeToggle" style="padding:8px 14px;font-size:.7rem;">🔍 XEM CHI TIẾT</button>
+          <div class="close-x" id="closeGallery">✕</div>
+        </div>
+      </div>
+      <div class="gallery-groups" id="galleryContent">
+        <div class="group-tabs" id="galleryTabs"></div>
+        <div id="galleryCards"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Secret code box - small, unobtrusive corner widget -->
+  <div id="secretCodeBox">
+    <span id="secretCodeIcon">🔑</span>
+    <input id="secretCodeInput" type="text" placeholder="Mã bí mật...">
+    <button id="secretCodeBtn">Nhập</button>
+    <span id="secretCodeMsg"></span>
+  </div>
+
+</div>
+
+<!-- Script load order matters (plain, non-module scripts sharing one global
+     scope) - keep this order when adding new files:
+     1. utils            - math/geometry helpers, speed-lock & status helpers
+     2. ability-helpers   - float text, particles, projectiles, hazards, explosions
+     3. balls             - GROUP_META + BALL_TYPES (every ball's stats & kit)
+     4. maps               - MAPS + map thumbnail SVGs
+     5. ball-class          - the Ball class
+     6. engine                - GameEngine class (physics/render/game loop)
+     7. ui                     - screen navigation, gallery, pickers, secret code
+     8. main                    - game state + startMatch/stopMatch bootstrap -->
+<script src="js/utils.js"></script>
+<script src="js/ability-helpers.js"></script>
+<script src="js/balls.js"></script>
+<script src="js/maps.js"></script>
+<script src="js/ball-class.js"></script>
+<script src="js/engine.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
