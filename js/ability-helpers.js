@@ -210,6 +210,15 @@ function applyHazardEffect(hz,ball,g,dt){
         spawnFloatText(g,ball.x,ball.y-30,'-'+dmg.toFixed(0),'#ff5c7c');
       }
       break;
+    case 'leafpatch':
+      if(g.t-(hz.lastHit[p]||0)>0.4){
+        hz.lastHit[p]=g.t;
+        const dmg=hz.dmg||5;
+        ball.hp=Math.max(0,ball.hp-dmg);
+        spawnFloatText(g,ball.x,ball.y-30,'-'+dmg.toFixed(0),'#6fbf3f');
+        spawnParticles(g,ball.x,ball.y,6,{color:'#8fd95f',type:'dust',speed:90,life:0.35});
+      }
+      break;
     case 'zonebox':
       if(g.t-(hz.lastHit[p]||0)>0.5){
         hz.lastHit[p]=g.t;

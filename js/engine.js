@@ -29,6 +29,9 @@ class GameEngine{
     // ---- visual-juice state (screen shake, hit-reaction bookkeeping) ----
     this.shakeMag=0; this.shakeUntil=0; this.shakeSeed=Math.random()*1000;
     this._hpPrevFrame=null;
+    // ---- game-loop bookkeeping (see start()/loop()) ----
+    this._loopQueued=false;  // guards against stacking multiple parallel RAF chains
+    this._lastFrameTime=null; // used to compute real delta-time each frame
     this._bindInput();
   }
   // Small, brief camera shake used for impacts/explosions - magnitude decays
@@ -65,6 +68,15 @@ class GameEngine{
     const size=Math.min(maxW,maxH);
     this.canvas.width=size; this.canvas.height=size;
     this.w=size; this.h=size;
+    // BUGFIX: obstacles/portals are built once in setupMap() as absolute
+    // pixel coordinates for whatever w/h the canvas had at that moment. If
+    // the window is resized mid-match (e.g. rotating a phone, or resizing a
+    // desktop browser window) this.w/this.h change here but the obstacles
+    // were never rebuilt for the new size, so the map geometry no longer
+    // matched the actual arena (obstacles could end up outside the canvas,
+    // or floating in the wrong relative spot). Rebuild the map for the new
+    // dimensions whenever one is already active.
+    if(this.mapDef) this.setupMap(this.mapDef);
   }
   _bindInput(){
     const c=this.canvas;
@@ -100,9 +112,12 @@ class GameEngine{
       const activeBall = this.phase==='aim1'? this.balls[0] : this.balls[1];
       const dx=this.dragStart.x-this.dragCurrent.x;
       const dy=this.dragStart.y-this.dragCurrent.y;
-      const power=clamp(Math.hypot(dx,dy),0,160);
-      if(power>8){
-        this.launchBall(activeBall, Math.atan2(dy,dx), power/160);
+      const pullDist=Math.hypot(dx,dy);
+      // pull distance only decides whether a shot was actually taken (vs an
+      // accidental tap) - it no longer scales speed at all; every launch
+      // uses the ball's own fixed speed stat regardless of how far you pull.
+      if(pullDist>8){
+        this.launchBall(activeBall, Math.atan2(dy,dx));
       }
       if(this.phase==='aim1'){
         if(this.vsAI){
@@ -131,26 +146,26 @@ class GameEngine{
     window.addEventListener('touchcancel',up);
   }
   // Shared launch math - `ang` is the world-space direction the ball should
-  // fly in, `powerT` is 0..1 (fraction of max pull strength). Used by both
-  // the human drag-release handler and the AI's own aim routine so they
-  // behave identically once a shot is actually taken.
-  launchBall(ball, ang, powerT){
-    powerT=clamp(powerT,0,1);
-    const launchSpeed = 60 + powerT*(ball.baseSpeed*2.4);
+  // fly in. Speed is always this ball's own maximum speed - the same value
+  // a full-strength pull used to produce - it's just fixed now instead of
+  // scaling with how far you drag. Pull distance only ever decides direction
+  // (and whether you dragged far enough to count as a shot at all).
+  launchBall(ball, ang){
+    const launchSpeed = 60 + ball.baseSpeed*2.4;
     ball.vx=Math.cos(ang)*launchSpeed;
     ball.vy=Math.sin(ang)*launchSpeed;
     lockSpeed(ball, launchSpeed);
   }
   // AI's turn: aim roughly at the opponent (with a little human-like
-  // inaccuracy) and a randomized pull strength, then hand off to 'sim' just
-  // like a real player releasing their drag.
+  // inaccuracy), then hand off to 'sim' just like a real player releasing
+  // their drag. Speed is fixed (see launchBall), so there's no pull-strength
+  // to randomize anymore - only the aim angle varies.
   aiTakeShot(){
     const ball=this.balls[1], target=this.opponentOf(ball);
     if(target){
       const baseAng=Math.atan2(target.y-ball.y, target.x-ball.x);
       const ang=baseAng+rand(-0.16,0.16); // slight aim error, not a perfect laser
-      const powerT=rand(0.62,1.0);
-      this.launchBall(ball, ang, powerT);
+      this.launchBall(ball, ang);
     }
     this.aiFireAt=null;
     this.phase='sim';
@@ -169,12 +184,47 @@ class GameEngine{
     document.getElementById('btnRematch').style.display='none';
     this._lastTurnPhase=null;
     this.updateTurnGlow();
-    requestAnimationFrame(()=>this.loop());
+    // reset the real-time clock used for delta-time measurement (see loop())
+    // so the first frame of a fresh/rematch game never sees a huge dt caused
+    // by time elapsed since the previous match ended.
+    this._lastFrameTime=null;
+    // BUGFIX: start() used to unconditionally queue a brand-new
+    // requestAnimationFrame chain every time it ran. Because stop() is only
+    // called when returning to the main menu - NOT when a match ends or the
+    // player hits "Đấu lại" (Rematch) - the *previous* match's loop() chain
+    // was still alive and calling itself every frame. Each rematch therefore
+    // stacked one more parallel loop() chain on top of the others, so
+    // update()/render() (and therefore ball movement, collisions and damage)
+    // ran 2x, 3x, 4x... as many times per real animation frame the more
+    // times you replayed - balls got faster and hits doubled up the longer
+    // a session went on. We now only ever kick off ONE loop chain, guarded
+    // by _loopQueued; loop() clears the flag when it actually stops so a
+    // later start() (e.g. after returning to the menu and starting again)
+    // can safely queue a new chain.
+    if(!this._loopQueued){
+      this._loopQueued=true;
+      requestAnimationFrame((ts)=>this.loop(ts));
+    }
   }
   stop(){ this.running=false; }
-  loop(){
-    if(!this.running) return;
-    const dt=Math.min(0.033,1/60);
+  loop(ts){
+    if(!this.running){ this._loopQueued=false; return; }
+    // BUGFIX: dt used to be hardcoded to Math.min(0.033, 1/60), which always
+    // evaluates to exactly 1/60s regardless of how much real time actually
+    // passed between frames. requestAnimationFrame fires once per display
+    // refresh, so on a 90Hz/120Hz screen (common on phones) this loop runs
+    // 1.5x/2x more often than on a 60Hz screen while still advancing the
+    // simulation by a fixed 1/60s each time - the whole match (ball speed,
+    // cooldowns, timers...) played out proportionally faster on higher
+    // refresh-rate devices. We now measure the REAL elapsed time between
+    // frames and use that as dt (clamped to avoid a huge jump after the tab
+        // was backgrounded or the device hitched), so match speed is now
+    // identical across every device regardless of its refresh rate.
+    const nowMs = (typeof ts==='number') ? ts : performance.now();
+    if(this._lastFrameTime==null) this._lastFrameTime=nowMs;
+    let dt=(nowMs-this._lastFrameTime)/1000;
+    this._lastFrameTime=nowMs;
+    dt=clamp(dt,0,0.033); // cap at ~1/30s so tab-switch/lag spikes can't cause a huge simulation jump
     this.t+=dt;
     if(this.phase!==this._lastTurnPhase){
       this._lastTurnPhase=this.phase;
@@ -184,8 +234,8 @@ class GameEngine{
       this.aiTakeShot();
     }
     if(this.phase==='sim') this.update(dt);
-    this.render();
-    requestAnimationFrame(()=>this.loop());
+    this.render(dt);
+    requestAnimationFrame((ts2)=>this.loop(ts2));
   }
 
   update(dt){
@@ -206,9 +256,10 @@ class GameEngine{
       // no longer crawls at a reduced rate.
       // ball.state.ccImmune (e.g. Florentino Ball mid-combo) bypasses all of
       // this entirely - such a ball simply cannot be frozen/rooted/stunned,
-      // nor disoriented (see below).
+      // nor disoriented (see below). clockFrozenUntil (Clock Ball's time-stop
+      // hitting an opponent) joins the same OR-chain - same hard stop.
       if(!ball.state.ccImmune){
-        if(this.t < (ball.state.frozenUntil||0) || this.t < (ball.state.rootUntil||0) || this.t < (ball.state.stunUntil||0)){
+        if(this.t < (ball.state.frozenUntil||0) || this.t < (ball.state.rootUntil||0) || this.t < (ball.state.stunUntil||0) || this.t < (ball.state.clockFrozenUntil||0) || this.t < (ball.state.potionFrozenUntil||0) || this.t < (ball.state.potionShockUntil||0)){
           localDt=0;
         }
       }
@@ -244,7 +295,7 @@ class GameEngine{
         if(ball.speedLock<=0) lockSpeed(ball, Math.hypot(ball.vx,ball.vy));
       }
 
-      // poison / burn damage-over-time tick (Poison Spike trap, Potion Ball burn)
+      // poison / burn damage-over-time tick (Poison Spike trap, legacy Potion Ball burn)
       if(this.t < (ball.state.poisonUntil||0)){
         ball.state.poisonTick=(ball.state.poisonTick||0)+dt;
         if(ball.state.poisonTick>0.5){
@@ -252,6 +303,57 @@ class GameEngine{
           const pdmg=ball.state.poisonTickDmg||3;
           ball.hp=Math.max(0,ball.hp-pdmg);
           spawnFloatText(this,ball.x,ball.y-30,'-'+pdmg.toFixed(0),'#8dff7a');
+        }
+      }
+
+      // ---- Potion Ball (redesigned): burn / toxic / frozen / shock / health
+      // ticks. These are generic state fields so ANY ball type can carry
+      // them (whoever got hit by a thrown potion) - no floating "BURN!"-style
+      // labels are shown per the design; only small status icons above the
+      // ball (see render()) communicate what's active, and they can freely
+      // overlap when several effects are stacked at once.
+      if(this.t < (ball.state.potionBurnUntil||0)){
+        ball.state.potionBurnTick=(ball.state.potionBurnTick||0)+dt;
+        if(ball.state.potionBurnTick>0.3){
+          ball.state.potionBurnTick=0;
+          ball.hp=Math.max(0,ball.hp-3);
+          spawnParticles(this,ball.x,ball.y,4,{color:'#ff8a3d',type:'spark',speed:80});
+        }
+      }
+      if(this.t < (ball.state.potionToxicUntil||0)){
+        ball.state.potionToxicTick=(ball.state.potionToxicTick||0)+dt;
+        if(ball.state.potionToxicTick>0.3){
+          ball.state.potionToxicTick=0;
+          const pd=ball.state.potionToxicDmg||3;
+          ball.hp=Math.max(0,ball.hp-pd);
+          ball.state.potionToxicDmg=pd+3; // ramps up each tick while active
+          spawnParticles(this,ball.x,ball.y,4,{color:'#7CFF3A',type:'spark',speed:80});
+        }
+      } else if(ball.state.potionToxicDmg){
+        ball.state.potionToxicDmg=3; // resets once the effect wears off
+      }
+      if(this.t < (ball.state.potionFrozenUntil||0)){
+        ball.state.potionFrozenTick=(ball.state.potionFrozenTick||0)+dt;
+        if(ball.state.potionFrozenTick>0.2){
+          ball.state.potionFrozenTick=0;
+          ball.hp=Math.max(0,ball.hp-1);
+          spawnParticles(this,ball.x,ball.y,3,{color:'#8fdcff',type:'spark',speed:60});
+        }
+      }
+      if(this.t < (ball.state.potionShockUntil||0)){
+        ball.state.potionShockTick=(ball.state.potionShockTick||0)+dt;
+        if(ball.state.potionShockTick>0.2){
+          ball.state.potionShockTick=0;
+          ball.hp=Math.max(0,ball.hp-1);
+          spawnParticles(this,ball.x,ball.y,3,{color:'#fff36a',type:'spark',speed:100});
+        }
+      }
+      if(this.t < (ball.state.potionHealthUntil||0)){
+        ball.state.potionHealthTick=(ball.state.potionHealthTick||0)+dt;
+        if(ball.state.potionHealthTick>0.3){
+          ball.state.potionHealthTick=0;
+          ball.hp=Math.min(ball.maxHp,ball.hp+7);
+          spawnParticles(this,ball.x,ball.y,4,{color:'#7CFF9A',type:'glow',speed:40});
         }
       }
 
@@ -360,6 +462,7 @@ class GameEngine{
     if(target.def.modifyIncoming && powerOk(target,this)) dmg=target.def.modifyIncoming(target,attacker,dmg,this,'projectile');
     dmg=applyVulnerability(target,dmg,this);
     dmg=applyStunPenalty(attacker,dmg,this);
+    dmg=applyBurnPenalty(attacker,dmg,this);
     target.hp=Math.max(0,target.hp-dmg);
     if(attacker.def.onDealDamage && powerOk(attacker,this)) attacker.def.onDealDamage(attacker,target,dmg,this);
     if(target.def.onTakeDamage && powerOk(target,this)) target.def.onTakeDamage(target,attacker,dmg,this);
@@ -703,6 +806,7 @@ class GameEngine{
     if(defender.def.modifyIncoming && powerOk(defender,this)) dmg=defender.def.modifyIncoming(defender,attacker,dmg,this,'collision');
     dmg=applyVulnerability(defender,dmg,this);
     dmg=applyStunPenalty(attacker,dmg,this);
+    dmg=applyBurnPenalty(attacker,dmg,this);
     defender.hp=Math.max(0,defender.hp-dmg);
     if(attacker.def.onDealDamage && powerOk(attacker,this)) attacker.def.onDealDamage(attacker,defender,dmg,this);
     if(defender.def.onTakeDamage && powerOk(defender,this)) defender.def.onTakeDamage(defender,attacker,dmg,this);
@@ -765,7 +869,10 @@ class GameEngine{
     }
   }
 
-  render(){
+  render(dt){
+    // Fallback so any other/older call site that still calls render() with
+    // no argument keeps behaving exactly like before (assume ~60fps).
+    if(dt==null) dt=1/60;
     const ctx=this.ctx;
     ctx.clearRect(0,0,this.w,this.h);
     ctx.save();
@@ -902,6 +1009,20 @@ class GameEngine{
         ctx.fillStyle=`rgba(217,79,79,${0.16*pulse})`; ctx.fillRect(hz.x,hz.y,hz.w,hz.h);
         ctx.strokeStyle='#d94f4f'; ctx.lineWidth=2; ctx.setLineDash([5,4]); ctx.lineDashOffset=-this.t*14;
         ctx.strokeRect(hz.x,hz.y,hz.w,hz.h); ctx.setLineDash([]);
+      } else if(hz.type==='leafpatch'){
+        // a single fallen leaf, not a generic glow blob - small rotated
+        // leaf shape that settles then fades near the end of its life
+        const life=clamp((hz.until-this.t)/1.4,0,1);
+        ctx.shadowColor='#6fbf3f'; ctx.shadowBlur=8;
+        ctx.globalAlpha=0.35+0.5*life;
+        ctx.translate(hz.x,hz.y); ctx.rotate((hz._rot=hz._rot||Math.random()*Math.PI*2));
+        ctx.fillStyle= life>0.5?'#6fbf3f':'#a3874a';
+        ctx.beginPath();
+        ctx.moveTo(0,-hz.r*0.9); ctx.quadraticCurveTo(hz.r*0.7,0,0,hz.r*0.9);
+        ctx.quadraticCurveTo(-hz.r*0.7,0,0,-hz.r*0.9);
+        ctx.fill();
+        ctx.strokeStyle='rgba(255,255,255,0.25)'; ctx.lineWidth=1;
+        ctx.beginPath(); ctx.moveTo(0,-hz.r*0.85); ctx.lineTo(0,hz.r*0.85); ctx.stroke();
       }
       ctx.restore();
     }
@@ -1149,29 +1270,26 @@ class GameEngine{
       ctx.fillText('🤖', ball.x, ball.y-ball.radius-22-Math.sin(this.t*5)*3);
       ctx.restore();
     }
-    // aim trajectory preview — glowing gradient shot line + arrowhead +
-    // a power ring around the ball so the pull feels tactile
+    // aim trajectory preview — glowing gradient shot line + arrowhead. No
+    // more "power ring" here: speed is fixed per ball now, so how far you
+    // pull only sets the direction/preview length, never how hard it launches.
     if(this.dragging){
       const activeBall = this.phase==='aim1'? this.balls[0]: this.balls[1];
       const turnCol = this.phase==='aim1' ? '#d94f4f' : '#3d6fd9';
       const dx=this.dragStart.x-this.dragCurrent.x;
       const dy=this.dragStart.y-this.dragCurrent.y;
-      const power=clamp(Math.hypot(dx,dy),0,160);
-      const powerT=power/160;
       const aimLen=1.4;
       const ex=activeBall.x+dx*aimLen, ey=activeBall.y+dy*aimLen;
 
       ctx.save();
-      // power ring pulsing around the ball, fills up as you pull harder
+      // plain static aim ring around the ball - just marks "you're aiming",
+      // doesn't fill/charge since pull strength no longer does anything
       ctx.beginPath(); ctx.arc(activeBall.x,activeBall.y,activeBall.radius+14,0,Math.PI*2);
-      ctx.strokeStyle=rgba(turnCol,0.25); ctx.lineWidth=3; ctx.stroke();
-      ctx.beginPath(); ctx.arc(activeBall.x,activeBall.y,activeBall.radius+14,-Math.PI/2,-Math.PI/2+Math.PI*2*powerT);
-      ctx.shadowColor=turnCol; ctx.shadowBlur=10;
-      ctx.strokeStyle=turnCol; ctx.lineWidth=3; ctx.stroke();
+      ctx.shadowColor=turnCol; ctx.shadowBlur=8;
+      ctx.strokeStyle=rgba(turnCol,0.55); ctx.lineWidth=3; ctx.stroke();
       ctx.shadowBlur=0;
 
-      // dashed predicted-path line with a marching-ants animation, glow tinted
-      // by the current pull strength
+      // dashed predicted-path line with a marching-ants animation
       const lineGrad=ctx.createLinearGradient(activeBall.x,activeBall.y,ex,ey);
       lineGrad.addColorStop(0,rgba(turnCol,0.9));
       lineGrad.addColorStop(1,rgba(turnCol,0.15));
@@ -1244,6 +1362,10 @@ class GameEngine{
       // runtime (e.g. Werewolf Ball's human/wolf forms) without mutating
       // the shared `def` object that every instance of that type points to
       const bodyColor=ball.bodyColorOverride||ball.def.color||ball.color;
+      // bodyAlphaOverride mirrors bodyColorOverride: lets a ball type fade
+      // its own solid body mid-ability (e.g. Leaf Ball dissolving into a
+      // leaf swirl) without touching the shared `def`.
+      ctx.globalAlpha = ball.bodyAlphaOverride!=null ? ball.bodyAlphaOverride : 1;
       drawFlatShape(ctx,ball.def.shape,ball.x,ball.y,ball.radius);
       const grad=ctx.createRadialGradient(
         ball.x-ball.radius*0.35, ball.y-ball.radius*0.4, ball.radius*0.15,
@@ -1281,6 +1403,52 @@ class GameEngine{
         ctx.strokeStyle=`rgba(255,59,59,${0.35+pr*0.35})`; ctx.lineWidth=2; ctx.stroke();
       }
 
+      // time-frozen overlay: generic to ANY ball type (opponent caught by
+      // Clock Ball's time-stop) - icy-cyan desaturating wash + a stopped
+      // clock-hand glyph, independent of that ball's own renderExtra so it
+      // reads the same no matter which ball got frozen.
+      if(this.t < (ball.state.clockFrozenUntil||0)){
+        ctx.save();
+        ctx.globalAlpha=0.45;
+        ctx.beginPath(); ctx.arc(ball.x,ball.y,ball.radius,0,Math.PI*2);
+        ctx.fillStyle='rgba(125,211,252,0.35)'; ctx.fill();
+        ctx.globalAlpha=0.9;
+        ctx.strokeStyle='#7dd3fc'; ctx.lineWidth=2; ctx.setLineDash([3,3]);
+        ctx.beginPath(); ctx.arc(ball.x,ball.y,ball.radius+5,0,Math.PI*2); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+
+      // Potion Ball status icons - generic to ANY ball type that got hit by
+      // a thrown potion (or, for the health icon, the thrower buffing
+      // itself). No text label per the design - just small icon chips above
+      // the ball, freely overlapping when several effects stack at once.
+      {
+        const potionIcons=[];
+        if(this.t<(ball.state.potionBurnUntil||0)) potionIcons.push({icon:'🔥',color:'#ff8a3d'});
+        if(this.t<(ball.state.potionToxicUntil||0)) potionIcons.push({icon:'☠️',color:'#7CFF3A'});
+        if(this.t<(ball.state.potionFrozenUntil||0)) potionIcons.push({icon:'❄️',color:'#8fdcff'});
+        if(this.t<(ball.state.potionShockUntil||0)) potionIcons.push({icon:'⚡',color:'#fff36a'});
+        if(this.t<(ball.state.potionHealthUntil||0)) potionIcons.push({icon:'💚',color:'#7CFF9A'});
+        if(potionIcons.length){
+          const iconR=9, spacing=12;
+          const totalW=(potionIcons.length-1)*spacing;
+          const baseY=ball.y-ball.radius-16;
+          potionIcons.forEach((pi,idx)=>{
+            const ix=ball.x-totalW/2+idx*spacing;
+            ctx.save();
+            ctx.shadowColor=pi.color; ctx.shadowBlur=6;
+            ctx.beginPath(); ctx.arc(ix,baseY,iconR,0,Math.PI*2);
+            ctx.fillStyle='rgba(255,255,255,0.9)'; ctx.fill();
+            ctx.lineWidth=1; ctx.strokeStyle=pi.color; ctx.stroke();
+            ctx.shadowBlur=0;
+            ctx.font='12px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+            ctx.fillText(pi.icon,ix,baseY+1);
+            ctx.restore();
+          });
+        }
+      }
+
       // per-ball custom visuals (orbit blades, tail, aura ring, shield, minion...)
       if(ball.def.renderExtra) ball.def.renderExtra(ball,this,ctx);
     }
@@ -1289,8 +1457,8 @@ class GameEngine{
     // particles — spark / glow / dust flavors, glowing, with drift+gravity
     for(const p of this.particles){
       const a=clamp((p.until-this.t)/((p.until-p.born)||0.4),0,1);
-      p.x += (p.vx||0)*0.0166; p.y += (p.vy||0)*0.0166;
-      if(p.gravity) p.vy += p.gravity*0.0166;
+      p.x += (p.vx||0)*dt; p.y += (p.vy||0)*dt;
+      if(p.gravity) p.vy += p.gravity*dt;
       ctx.save();
       if(p.type==='glow'){
         ctx.shadowColor=p.color; ctx.shadowBlur=10;
@@ -1302,7 +1470,7 @@ class GameEngine{
         ctx.fillStyle=p.color;
         ctx.fillRect(p.x-p.r*0.5,p.y-p.r*0.5,p.r,p.r);
       } else if(p.type==='confetti'){
-        p.rot=(p.rot||0)+(p.rotSpeed||0)*0.0166;
+        p.rot=(p.rot||0)+(p.rotSpeed||0)*dt;
         ctx.globalAlpha=a;
         ctx.translate(p.x,p.y); ctx.rotate(p.rot);
         ctx.fillStyle=p.color;

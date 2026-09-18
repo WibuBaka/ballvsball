@@ -114,6 +114,13 @@ function applyStunPenalty(attacker,dmg,g){
   return dmg;
 }
 
+// Potion Ball's Burn effect: while burning, a ball's own outgoing damage is
+// halved - on top of whatever its own kit and other penalties calculate.
+function applyBurnPenalty(attacker,dmg,g){
+  if(g.t < (attacker.state.potionBurnUntil||0)) return dmg*0.5;
+  return dmg;
+}
+
 // Knockback that respects CC immunity (Florentino Ball's ccImmune, etc.) -
 // use this instead of touching vx/vy on an opponent directly anywhere in
 // the game. additive=true adds to the ball's existing velocity (the usual

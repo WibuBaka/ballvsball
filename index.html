@@ -82,21 +82,17 @@
 
   <!-- BALL GALLERY MODAL -->
   <div class="modal-backdrop" id="galleryModal">
-    <div class="modal-box glass gallery-modal-box">
+    <div class="modal-box glass">
       <div class="modal-header">
         <h2>📖 BALL GALLERY</h2>
-        <div class="close-x" id="closeGallery">✕</div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button class="btn" id="galleryModeToggle" style="padding:8px 14px;font-size:.7rem;">🔍 XEM CHI TIẾT</button>
+          <div class="close-x" id="closeGallery">✕</div>
+        </div>
       </div>
-      <div class="gallery-body">
-        <div class="gallery-list-pane">
-          <div class="group-tabs" id="galleryTabs"></div>
-          <div class="gallery-groups" id="galleryContent">
-            <div id="galleryCards"></div>
-          </div>
-        </div>
-        <div class="gallery-detail-pane glass" id="galleryDetail">
-          <div class="gallery-detail-placeholder">👈<span>Chọn một quả bóng<br>để xem chi tiết</span></div>
-        </div>
+      <div class="gallery-groups" id="galleryContent">
+        <div class="group-tabs" id="galleryTabs"></div>
+        <div id="galleryCards"></div>
       </div>
     </div>
   </div>
