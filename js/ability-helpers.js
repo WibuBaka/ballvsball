@@ -89,11 +89,15 @@ function spawnFloatText(g,x,y,text,color){
   // nudge each new one a bit higher based on how many recent ones are still
   // alive near this exact spot, so they read as a readable vertical list
   // instead of a smudge of overlapping text.
+  // Effects run on g.fxT (a clock that NEVER stops) instead of g.t (game time,
+  // which freezes during a Clock Ball time-stop) so damage numbers / sparks
+  // keep animating and expire normally while the world is stopped.
+  const T=(g.fxT!=null)?g.fxT:g.t;
   let stack=0;
   for(const f of g.floatTexts){
-    if(g.t-f.born<0.35 && Math.abs(f.x-x)<26 && Math.abs(f.y-y)<40) stack++;
+    if(T-f.born<0.35 && Math.abs(f.x-x)<26 && Math.abs(f.y-y)<40) stack++;
   }
-  g.floatTexts.push({x,y:y-stack*15,text,color,born:g.t,until:g.t+1.05,drift:rand(-14,14)});
+  g.floatTexts.push({x,y:y-stack*15,text,color,born:T,until:T+1.05,drift:rand(-14,14)});
 }
 // count = how many; opts = {color, speed, spread, type, gravity, size}
 //   type 'spark'  - bright streaking dot, shrinks fast (impacts/hits)
@@ -104,13 +108,14 @@ function spawnParticles(g,x,y,count=8,opts={}){
   const type=opts.type||'spark';
   const speed=opts.speed!=null?opts.speed:110;
   const life=opts.life!=null?opts.life:(type==='glow'?0.55:0.4);
+  const T=(g.fxT!=null)?g.fxT:g.t; // see spawnFloatText: effects use the never-stopping clock
   for(let i=0;i<count;i++){
     const ang=rand(0,Math.PI*2);
     const spd=rand(speed*0.25,speed);
     g.particles.push({
       x:x+rand(-6,6), y:y+rand(-6,6),
       vx:Math.cos(ang)*spd, vy:Math.sin(ang)*spd,
-      r:opts.size||rand(2,5), born:g.t, until:g.t+life*rand(0.7,1.15),
+      r:opts.size||rand(2,5), born:T, until:T+life*rand(0.7,1.15),
       color, type, gravity:opts.gravity!=null?opts.gravity:(type==='dust'?260:0)
     });
   }
@@ -208,6 +213,15 @@ function applyHazardEffect(hz,ball,g,dt){
         const dmg=hz.dmg||8;
         ball.hp=Math.max(0,ball.hp-dmg);
         spawnFloatText(g,ball.x,ball.y-30,'-'+dmg.toFixed(0),'#ff5c7c');
+      }
+      break;
+    case 'leafpatch':
+      if(g.t-(hz.lastHit[p]||0)>0.4){
+        hz.lastHit[p]=g.t;
+        const dmg=hz.dmg||5;
+        ball.hp=Math.max(0,ball.hp-dmg);
+        spawnFloatText(g,ball.x,ball.y-30,'-'+dmg.toFixed(0),'#6fbf3f');
+        spawnParticles(g,ball.x,ball.y,6,{color:'#8fd95f',type:'dust',speed:90,life:0.35});
       }
       break;
     case 'zonebox':

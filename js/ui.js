@@ -3,8 +3,18 @@ let selectedMap=0;
 let p1Ball=null, p2Ball=null;
 let vsAI=false;
 let galleryFilter='all';
-let selectedGalleryBall=null; // id of the ball currently shown in the gallery's detail panel
+let gallerySelectedId=null; // ball currently shown in the gallery detail panel
 let p1Filter='all', p2Filter='all';
+
+// HP shown anywhere in the UI (gallery grid, hover popup, pick summary) is
+// the REAL in-game max HP (def.hp*1.6, same formula the engine itself uses
+// for ball.maxHp) - not the raw balance-only `hp` stat field. Gameplay HP
+// values themselves are untouched; this only fixes what's displayed.
+// Momentum-bar balls (Beyblade) have no real HP at all, so callers keep
+// handling that case themselves with their own "ĐL 100%" label.
+function maxHpDisplay(bt){
+  return Math.round(bt.hp*1.6);
+}
 
 // Shared tab bar used by both the Gallery and the two ball-pick grids -
 // "Tất cả" plus one tab per GROUP_META entry, color-matched to that group.
@@ -31,12 +41,16 @@ const screens = {
 function showScreen(name){
   Object.values(screens).forEach(s=>s.classList.remove('active'));
   screens[name].classList.add('active');
+  // lets CSS react to the current screen (e.g. hide the secret-code box on
+  // touch devices while a match is running)
+  document.body.dataset.screen=name;
 }
+document.body.dataset.screen='menu';
 
 /* ---------------------------- MENU NAV ------------------------------------*/
 document.getElementById('btnPlay').onclick=()=>{ vsAI=false; buildMapGrid(); showScreen('map'); };
 document.getElementById('btnPlayAI').onclick=()=>{ vsAI=true; p2Ball=null; buildMapGrid(); showScreen('map'); };
-document.getElementById('btnGallery').onclick=()=>{ selectedGalleryBall=null; buildGallery(); document.getElementById('galleryModal').classList.add('active'); };
+document.getElementById('btnGallery').onclick=()=>{ gallerySelectedId=null; buildGallery(); document.getElementById('galleryModal').classList.add('active'); };
 document.getElementById('closeGallery').onclick=()=>{ document.getElementById('galleryModal').classList.remove('active'); };
 
 /* ---------------------------- SECRET CODE ---------------------------------*/
@@ -69,6 +83,13 @@ function submitSecretCode(){
   }
 }
 document.getElementById('secretCodeBtn').onclick=submitSecretCode;
+// On phones/tablets the box is collapsed to just the key icon (see CSS) and
+// expands when the icon is tapped, so it never covers the game or the buttons.
+document.getElementById('secretCodeIcon').onclick=()=>{
+  const box=document.getElementById('secretCodeBox');
+  box.classList.toggle('open');
+  if(box.classList.contains('open')) document.getElementById('secretCodeInput').focus();
+};
 document.getElementById('secretCodeInput').addEventListener('keydown',(e)=>{
   if(e.key==='Enter') submitSecretCode();
 });
@@ -83,15 +104,17 @@ document.getElementById('btnMenu').onclick=()=>{ stopMatch(); showScreen('menu')
 document.getElementById('btnRematch').onclick=()=>{ startMatch(); };
 
 /* ---------------------------- BUILD: GALLERY ------------------------------*/
-// Left pane: compact clickable cards (icon + name + 1-line blurb) grouped by
-// category. Right pane: sticky detail panel that fills in with the full
-// description + stats for whichever ball was last clicked.
+// Left column: browsable list of balls (short blurb only, clamped to 5 lines).
+// Clicking a card opens its full breakdown in the detail column on the right,
+// instead of a global toggle that used to switch every card at once.
 function buildGallery(){
   const tabsHost=document.getElementById('galleryTabs');
   const host=document.getElementById('galleryCards');
+  const keepScroll=host.scrollTop; // rebuilding the list would otherwise jump it back to the top
   host.innerHTML='';
   renderGroupTabs(tabsHost, galleryFilter, (key)=>{ galleryFilter=key; buildGallery(); });
   const groupsToShow = galleryFilter==='all' ? Object.keys(GROUP_META) : [galleryFilter];
+  let firstBall=null;
   groupsToShow.forEach(gKey=>{
     const meta=GROUP_META[gKey];
     const block=document.createElement('div'); block.className='group-block';
@@ -100,51 +123,57 @@ function buildGallery(){
     block.appendChild(title);
     const grid=document.createElement('div'); grid.className='ball-grid';
     BALL_TYPES.filter(bt=>bt.group===gKey).forEach(bt=>{
+      if(!firstBall) firstBall=bt;
       const card=document.createElement('div');
-      card.className='ball-card'+(bt.id===selectedGalleryBall?' selected':'');
+      card.className='ball-card'+(bt.id===gallerySelectedId?' selected':'');
       card.style.setProperty('--card-color',meta.color);
-      card.innerHTML=`<div class="ball-dot" style="background:${meta.color}">${bt.icon}</div>
+      card.dataset.ballId=bt.id;
+      card.innerHTML=`<div class="ball-dot" style="background:${meta.color};color:${meta.color}"></div>
         <div class="info">
-          <b>${bt.name}</b>
-          <span>${bt.descSimple}</span>
+          <b>${bt.icon} ${bt.name}</b>
+          <div class="stat-row" style="margin:3px 0;font-size:.72rem;font-weight:700;color:var(--text-1);"><span>${bt.momentumBar?'ĐL 100%':'HP '+maxHpDisplay(bt)}</span><span>SPD ${bt.speed}</span><span>DMG ${bt.dmg}</span></div>
+          <span class="ball-card-blurb">${bt.descSimple}</span>
         </div>`;
-      card.onclick=()=>{
-        selectedGalleryBall=bt.id;
-        host.querySelectorAll('.ball-card').forEach(el=>el.classList.remove('selected'));
-        card.classList.add('selected');
-        renderGalleryDetail(bt);
-      };
+      card.onclick=()=>{ gallerySelectedId=bt.id; buildGallery(); };
       grid.appendChild(card);
     });
     block.appendChild(grid);
     host.appendChild(block);
   });
-  const current=BALL_TYPES.find(b=>b.id===selectedGalleryBall);
-  renderGalleryDetail(current);
+  // Keep a selection alive across tab switches when possible; otherwise land
+  // on the first ball of whatever's currently visible so the panel is never
+  // empty while browsing (it only shows the placeholder before any click).
+  const stillVisible = gallerySelectedId && BALL_TYPES.some(bt=>bt.id===gallerySelectedId && (galleryFilter==='all'||bt.group===galleryFilter));
+  if(gallerySelectedId && !stillVisible) gallerySelectedId=null;
+  renderGalleryDetail(gallerySelectedId ? BALL_TYPES.find(bt=>bt.id===gallerySelectedId) : null);
+  host.scrollTop=keepScroll;
 }
 function renderGalleryDetail(bt){
-  const panel=document.getElementById('galleryDetail');
+  const host=document.getElementById('galleryDetail');
   if(!bt){
-    panel.innerHTML=`<div class="gallery-detail-placeholder">👈<span>Chọn một quả bóng<br>để xem chi tiết</span></div>`;
+    // on narrow screens the detail panel sits ABOVE the list, so point down
+    const narrow=window.matchMedia && window.matchMedia('(max-width:720px)').matches;
+    host.innerHTML='<div class="gallery-detail-empty">'+(narrow?'👇 Chạm vào một quả bóng để xem chi tiết':'👈 Chọn một quả bóng để xem chi tiết')+'</div>';
     return;
   }
   const meta=GROUP_META[bt.group];
-  panel.style.setProperty('--gd-color',meta.color);
-  panel.innerHTML=`
+  host.style.setProperty('--card-color',meta.color);
+  host.innerHTML=`
     <div class="gallery-detail-head">
-      <div class="gallery-detail-icon" style="background:${meta.color}">${bt.icon}</div>
-      <div class="gallery-detail-titles">
-        <div class="gallery-detail-name">${bt.name}</div>
-        <div class="gallery-detail-group" style="color:${meta.color}">${meta.label.replace(/^Nhóm /,'')}</div>
+      <div class="gallery-detail-icon" style="background:${meta.color};color:${meta.color}">${bt.icon}</div>
+      <div>
+        <b class="gallery-detail-name">${bt.name}</b>
+        <div class="gallery-detail-group" style="color:${meta.color}">${meta.label}</div>
       </div>
     </div>
     <div class="gallery-detail-stats">
-      <div class="gd-stat"><span>${bt.momentumBar?'ĐL':'HP'}</span><b>${bt.momentumBar?'100%':bt.hp}</b></div>
+      <div class="gd-stat"><span>${bt.momentumBar?'ĐL':'HP'}</span><b>${bt.momentumBar?'100%':maxHpDisplay(bt)}</b></div>
       <div class="gd-stat"><span>SPD</span><b>${bt.speed}</b></div>
       <div class="gd-stat"><span>DMG</span><b>${bt.dmg}</b></div>
     </div>
-    <div class="gallery-detail-label">Cách hoạt động</div>
-    <div class="gallery-detail-desc">${bt.desc}</div>`;
+    <div class="gallery-detail-section-label">CÁCH HOẠT ĐỘNG</div>
+    <div class="gallery-detail-text">${bt.desc}</div>`;
+  host.scrollTop=0; // new ball -> start reading from the top
 }
 
 /* ---------------------------- BUILD: MAP GRID -----------------------------*/
@@ -228,7 +257,6 @@ function buildPickerGrid(hostId, player){
     // Florentino Ball stays locked (greyed out, unclickable) until the "FLO"
     // secret code is entered in the corner box.
     if(bt.id==='florentino' && !florentinoUnlocked){
-      item.classList.add('locked');
       item.style.borderColor='#555a6e';
       item.style.color='#555a6e';
       item.style.cursor='not-allowed';
@@ -258,30 +286,26 @@ function buildPickerGrid(hostId, player){
 }
 function updateSummary(player, bt){
   const el=document.getElementById(player===1?'p1Summary':'p2Summary');
-  const meta=GROUP_META[bt.group];
-  el.classList.add('filled');
-  el.style.setProperty('--sum-color',meta.color);
-  el.innerHTML=`<div class="summary-head">
-      <div class="summary-icon" style="background:${meta.color}">${bt.icon}</div>
-      <b>${bt.name}</b>
-    </div>
-    <div class="stat-row"><span>${bt.momentumBar?'ĐL':'HP'}</span><span>${bt.momentumBar?'100%':bt.hp}</span></div>
+  el.innerHTML=`<b>${bt.icon} ${bt.name}</b>
+    <div class="stat-row"><span>HP</span><span>${bt.momentumBar?'ĐL 100%':maxHpDisplay(bt)}</span></div>
     <div class="stat-row"><span>Speed</span><span>${bt.speed}</span></div>
     <div class="stat-row"><span>Damage</span><span>${bt.dmg}</span></div>
-    <div class="summary-desc">${bt.descSimple}</div>`;
+    <div style="margin-top:6px;color:var(--text-1)">${bt.descSimple}</div>`;
 }
 let statPopupEl=null;
 function showStatPopup(e,bt){
   hideStatPopup();
+  // hover tooltip - meaningless on touch (it would get stuck on screen after a
+  // tap); the pick summary panel already shows the same stats there
+  if(window.DEVICE && DEVICE.touchPrimary) return;
   const meta=GROUP_META[bt.group];
   statPopupEl=document.createElement('div');
   statPopupEl.className='stat-popup glass';
   statPopupEl.style.borderColor=meta.color;
   statPopupEl.innerHTML=`<b style="color:${meta.color}">${bt.icon} ${bt.name}</b>
-    <div class="stat-row"><span>${bt.momentumBar?'ĐL':'HP'}</span><span>${bt.momentumBar?'100%':bt.hp}</span></div>
+    <div class="stat-row"><span>HP</span><span>${bt.momentumBar?'ĐL 100%':maxHpDisplay(bt)}</span></div>
     <div class="stat-row"><span>Speed</span><span>${bt.speed}</span></div>
-    <div class="stat-row"><span>Damage</span><span>${bt.dmg}</span></div>
-    <div class="stat-popup-blurb">${bt.descSimple}</div>`;
+    <div class="stat-row"><span>Damage</span><span>${bt.dmg}</span></div>`;
   document.getElementById('app').appendChild(statPopupEl);
   positionStatPopup(e);
 }
