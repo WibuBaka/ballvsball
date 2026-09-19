@@ -26,4 +26,7 @@ function startMatch(){
   engine.start();
 }
 function stopMatch(){ if(engine) engine.stop(); }
-window.addEventListener('resize',()=>{ if(engine && engine.running) engine.resize(); });
+// 'layoutchange' is fired by device.js on every resize / phone rotation / browser
+// toolbar show-hide, after it has refreshed --app-h and the device classes - so
+// the arena is re-fitted using up-to-date layout measurements.
+window.addEventListener('layoutchange',()=>{ if(engine && engine.running) engine.resize(); });

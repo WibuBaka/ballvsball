@@ -1,3 +1,26 @@
+// When the sim phase begins, game time is lifted to at least this value.
+// Many kits use "cooldown measured from t=0" (Train 5s, Burst 5s, Axe 4s,
+// Leaf 3s...). Those abilities used to be ready on the first frame ONLY
+// because aiming happened to take longer than their cooldown - a quick aim
+// meant a different opening. Now every cooldown-from-zero ability is ready at
+// kickoff, deterministically, no matter how long the aiming phases took.
+const SIM_READY_T = 6;
+// how fast a temporary impulse (applyImpulse) dies away, 1/second
+const IMPULSE_DECAY = 2.2;
+// ---- fixed logical arena ----------------------------------------------------
+// The physics world is ALWAYS WORLD_SIZE x WORLD_SIZE units, on every device.
+// Only the on-screen (CSS) size of the canvas changes to fit the screen, and
+// the backing bitmap is scaled by devicePixelRatio so it stays sharp. This way
+// ball sizes, speeds, ranges and map layouts play exactly the same on a phone,
+// a tablet and a desktop (before, a phone got a ~350px arena, so balls looked
+// huge and travelled "faster" relative to the arena).
+const WORLD_SIZE = 620;
+// largest on-screen size of the arena, in CSS px (only matters on big monitors)
+const MAX_CANVAS_CSS = 860;
+// cap on the canvas pixel-ratio: 3x phones would render 2.25x more pixels for
+// almost no visible gain and the effects use a lot of shadowBlur
+const MAX_DPR = 2;
+
 class GameEngine{
   constructor(canvas){
     this.canvas=canvas;
@@ -17,11 +40,19 @@ class GameEngine{
     this.mapDef=null;
     this.mapObstacles=[];
     this.mapPortals=[];
+    this.mapSpawner=null;   // active map's random-wall spawner config (Moving Walls map), if any
+    this.spawnTimer=0;      // countdown (sim seconds) until the next random wall attempt
     this.running=false;
     this.phase='aim1'; // aim1 -> aim2 -> sim -> end
     this.dragging=false;
     this.dragStart=null;
     this.dragCurrent=null;
+    this._activePointer=null; // pointerId currently dragging (ignores extra fingers)
+    // ---- display scaling (see resize()) ----
+    this.cssSize=0;    // on-screen size of the square canvas, CSS px
+    this.viewScale=1;  // CSS px per world unit
+    this.pxScale=1;    // bitmap px per world unit (viewScale * dpr)
+    this.uiBoost=1;    // >1 on small screens: thickens aim lines / enlarges damage text
     this.winner=null;
     // ---- vs-AI mode ----
     this.vsAI=false;
@@ -29,14 +60,217 @@ class GameEngine{
     // ---- visual-juice state (screen shake, hit-reaction bookkeeping) ----
     this.shakeMag=0; this.shakeUntil=0; this.shakeSeed=Math.random()*1000;
     this._hpPrevFrame=null;
+    // ---- game-loop bookkeeping (see start()/loop()) ----
+    this._loopQueued=false;  // guards against stacking multiple parallel RAF chains
+    this._lastFrameTime=null; // used to compute real delta-time each frame
+    // ---- clocks ----
+    //   this.t   = GAME time. Every gameplay timer/cooldown/duration in the
+    //              whole game is measured against it. It FREEZES while a Clock
+    //              Ball time-stop is active, so nothing in the world can tick,
+    //              expire or "catch up" during the stop.
+    //   this.fxT = EFFECT time. Never stops. Used by particles, floating text,
+    //              screen shake, hit-flashes and the time-stop visuals
+    //              themselves, so those keep animating while the world is frozen.
+    //   this.simT0 = value of t when the sim phase began (moving walls are
+    //              phased from it so they never teleport at kickoff).
+    this.fxT=0;
+    this.simT0=0;
+    this.timeStop=null;        // active global time-stop: {owner,target,dur,elapsed}
+    this.timeStopRelease=null; // short "time resumes" visual after a stop ends
     this._bindInput();
   }
+
+  // ======================= GLOBAL TIME STOP (Clock Ball) =======================
+  // A time-stop freezes GAME time (this.t) for `dur` real seconds. Because every
+  // ability timer/cooldown/expiry in the game is measured against this.t, this
+  // stops ALL of them at once - and they resume exactly where they left off,
+  // with nothing skipped, expired early or "caught up" (that catch-up is what used
+  // to shorten Werewolf Ball's human/wolf cycle and similar timers).
+  // Only the owning ball's hooks (onTimeStopStart/Tick/End) run meanwhile.
+  isTimeStopOwner(ball){ return !!this.timeStop && this.timeStop.owner===ball; }
+  startTimeStop(owner,target,dur){
+    if(this.timeStop || this.phase!=='sim') return false; // never nest / restart a stop
+    this.timeStop={owner,target,dur,elapsed:0};
+    this.timeStopRelease=null;
+    const bar=document.getElementById('statusBar');
+    if(bar) bar.textContent='⏰ THỜI GIAN ĐÃ NGƯNG ĐỌNG';
+    if(owner.def.onTimeStopStart) owner.def.onTimeStopStart(owner,target,this,this.timeStop);
+    return true;
+  }
+  updateTimeStop(dt){
+    const ts=this.timeStop;
+    if(!ts) return;
+    ts.elapsed+=dt;
+    if(ts.owner.def.onTimeStopTick) ts.owner.def.onTimeStopTick(ts.owner,ts.target,this,ts);
+    if(ts.elapsed>=ts.dur) this.endTimeStop();
+  }
+  endTimeStop(){
+    const ts=this.timeStop;
+    if(!ts) return;
+    this.timeStop=null; // game time runs again from the very next frame
+    this.timeStopRelease={born:this.fxT,x:ts.owner.x,y:ts.owner.y};
+    if(this.phase==='sim'){
+      const bar=document.getElementById('statusBar');
+      if(bar) bar.textContent='⚔️ ĐANG GIAO TRANH ⚔️';
+    }
+    if(ts.owner.def.onTimeStopEnd) ts.owner.def.onTimeStopEnd(ts.owner,ts.target,this,ts);
+  }
+  // visual state shared by the two overlay passes: null when nothing to draw
+  _tsVisual(){
+    const ts=this.timeStop;
+    if(ts) return {active:true,k:easeOutCubic(ts.elapsed/0.12),p:clamp(ts.elapsed/ts.dur,0,1),rel:0,age:ts.elapsed};
+    const r=this.timeStopRelease;
+    if(r){
+      const age=this.fxT-r.born;
+      if(age<0.4) return {active:false,k:1-age/0.4,p:1,rel:age/0.4,age:1+age,r};
+      this.timeStopRelease=null;
+    }
+    return null;
+  }
+  // BEHIND the balls: color inversion of the whole arena + a giant clock face
+  // that rotates in the middle of the screen
+  _renderTimeStopBack(ctx){
+    const v=this._tsVisual();
+    if(!v) return;
+    const W=this.w, H=this.h, cx=W/2, cy=H/2, R=Math.min(W,H)*0.44, T=this.fxT;
+    // 1) inverted colors ("the world goes negative"), fades in/out
+    ctx.save();
+    ctx.globalCompositeOperation='difference';
+    ctx.globalAlpha=0.86*v.k;
+    ctx.fillStyle='#ffffff';
+    ctx.fillRect(-20,-20,W+40,H+40);
+    ctx.restore();
+    // 2) the giant clock
+    ctx.save();
+    ctx.translate(cx,cy);
+    ctx.globalAlpha=0.92*v.k;
+    ctx.lineCap='round';
+    const glow=ctx.createRadialGradient(0,0,R*0.2,0,0,R*1.15);
+    glow.addColorStop(0,'rgba(56,189,248,0.18)'); glow.addColorStop(0.7,'rgba(56,189,248,0.10)'); glow.addColorStop(1,'rgba(56,189,248,0)');
+    ctx.fillStyle=glow; ctx.beginPath(); ctx.arc(0,0,R*1.15,0,Math.PI*2); ctx.fill();
+    // expanding ripples from the centre
+    for(let i=0;i<3;i++){
+      const f=((T*0.9)+i/3)%1;
+      ctx.strokeStyle=`rgba(125,211,252,${(0.32*(1-f)).toFixed(3)})`; ctx.lineWidth=2;
+      ctx.beginPath(); ctx.arc(0,0,R*(0.1+f*0.95),0,Math.PI*2); ctx.stroke();
+    }
+    // outer double rim
+    ctx.shadowColor='#facc15'; ctx.shadowBlur=16;
+    ctx.strokeStyle='#facc15'; ctx.lineWidth=5;
+    ctx.beginPath(); ctx.arc(0,0,R,0,Math.PI*2); ctx.stroke();
+    ctx.shadowBlur=0;
+    ctx.strokeStyle='#7dd3fc'; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.arc(0,0,R*0.94,0,Math.PI*2); ctx.stroke();
+    // gear teeth on the rim, turning clockwise
+    const gearRot=T*0.9;
+    ctx.strokeStyle='#facc15'; ctx.lineWidth=R*0.035;
+    for(let i=0;i<24;i++){
+      const a=gearRot+i*Math.PI*2/24;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a)*R*1.01,Math.sin(a)*R*1.01);
+      ctx.lineTo(Math.cos(a)*R*1.075,Math.sin(a)*R*1.075);
+      ctx.stroke();
+    }
+    // minute/second tick ring, turning counter-clockwise
+    const dialRot=-T*0.55;
+    for(let i=0;i<60;i++){
+      const a=dialRot+i*Math.PI*2/60, major=(i%5===0);
+      const r0=R*(major?0.80:0.85), r1=R*0.9;
+      ctx.strokeStyle=major?'#facc15':'rgba(224,242,254,0.75)';
+      ctx.lineWidth=major?R*0.014:R*0.007;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a)*r0,Math.sin(a)*r0);
+      ctx.lineTo(Math.cos(a)*r1,Math.sin(a)*r1);
+      ctx.stroke();
+    }
+    // roman numerals stay put with XII at the top, so the hands really do land
+    // on XII when time resumes (only the rings around them turn)
+    const roman=['XII','I','II','III','IIII','V','VI','VII','VIII','IX','X','XI'];
+    ctx.fillStyle='rgba(250,204,21,0.95)';
+    ctx.font='bold '+Math.round(R*0.1)+'px Georgia,"Times New Roman",serif';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    for(let i=0;i<12;i++){
+      const a=i*Math.PI/6-Math.PI/2;
+      ctx.fillText(roman[i],Math.cos(a)*R*0.68,Math.sin(a)*R*0.68);
+    }
+    // inner dashed ring turning clockwise, a little faster
+    ctx.save();
+    ctx.setLineDash([R*0.06,R*0.05]); ctx.lineDashOffset=-T*R*0.35;
+    ctx.strokeStyle='rgba(125,211,252,0.7)'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(0,0,R*0.5,0,Math.PI*2); ctx.stroke();
+    ctx.restore();
+    // hands: the second hand sweeps one full turn over exactly the stop and
+    // lands on XII the instant time resumes; the minute hand creeps up to XII too
+    const secAng=-Math.PI/2+v.p*Math.PI*2;
+    const minAng=-Math.PI/2+(v.p-1)*Math.PI/6;
+    ctx.shadowColor='#facc15'; ctx.shadowBlur=10;
+    ctx.strokeStyle='#facc15'; ctx.lineWidth=R*0.03;
+    ctx.beginPath(); ctx.moveTo(-Math.cos(minAng)*R*0.08,-Math.sin(minAng)*R*0.08); ctx.lineTo(Math.cos(minAng)*R*0.6,Math.sin(minAng)*R*0.6); ctx.stroke();
+    ctx.shadowColor='#38bdf8';
+    ctx.strokeStyle='#e0f2fe'; ctx.lineWidth=R*0.014;
+    ctx.beginPath(); ctx.moveTo(-Math.cos(secAng)*R*0.16,-Math.sin(secAng)*R*0.16); ctx.lineTo(Math.cos(secAng)*R*0.84,Math.sin(secAng)*R*0.84); ctx.stroke();
+    ctx.shadowBlur=0;
+    ctx.fillStyle='#facc15'; ctx.beginPath(); ctx.arc(0,0,R*0.035,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+  // ABOVE everything: edge vignette, start/end flashes, the caption and the
+  // shockwave that marks time resuming
+  _renderTimeStopFront(ctx){
+    const v=this._tsVisual();
+    if(!v) return;
+    const W=this.w, H=this.h, cx=W/2, cy=H/2;
+    ctx.save();
+    // dark-blue vignette
+    const vg=ctx.createRadialGradient(cx,cy,Math.min(W,H)*0.32,cx,cy,Math.max(W,H)*0.75);
+    vg.addColorStop(0,'rgba(8,30,70,0)'); vg.addColorStop(1,'rgba(8,30,70,'+(0.55*v.k).toFixed(3)+')');
+    ctx.fillStyle=vg; ctx.fillRect(-20,-20,W+40,H+40);
+    if(v.active){
+      // white flash the instant time stops
+      if(v.age<0.16){
+        ctx.fillStyle='rgba(255,255,255,'+(0.75*(1-v.age/0.16)).toFixed(3)+')';
+        ctx.fillRect(-20,-20,W+40,H+40);
+      }
+      // caption
+      const ts=this.timeStop;
+      const pop=Math.max(0.05,easeOutBack(ts.elapsed/0.18)); // never scale(0,0): a singular transform breaks some canvas backends
+      ctx.translate(cx,H*0.085);
+      ctx.scale(pop,pop);
+      ctx.rotate(-0.03+Math.sin(this.fxT*40)*0.006);
+      ctx.font='italic 900 '+Math.round(W*0.052)+'px "Arial Black",Impact,sans-serif';
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.lineJoin='round';
+      ctx.lineWidth=Math.round(W*0.012); ctx.strokeStyle='#0c4a6e';
+      ctx.strokeText('NGƯNG ĐỌNG THỜI GIAN',0,0);
+      ctx.shadowColor='#38bdf8'; ctx.shadowBlur=14;
+      ctx.fillStyle='#e0f2fe'; ctx.fillText('NGƯNG ĐỌNG THỜI GIAN',0,0);
+      ctx.shadowBlur=0;
+      ctx.font='800 '+Math.round(W*0.03)+'px "Arial Black",Impact,sans-serif';
+      ctx.lineWidth=Math.round(W*0.008);
+      const left=Math.max(0,ts.dur-ts.elapsed).toFixed(2)+'s';
+      ctx.strokeText('⏰ '+left,0,W*0.052);
+      ctx.fillStyle='#facc15'; ctx.fillText('⏰ '+left,0,W*0.052);
+    } else {
+      // time resumes: quick white flash + a shockwave racing out from the clock ball
+      if(v.rel<0.2){
+        ctx.fillStyle='rgba(255,255,255,'+(0.55*(1-v.rel/0.2)).toFixed(3)+')';
+        ctx.fillRect(-20,-20,W+40,H+40);
+      }
+      const r=v.r;
+      ctx.globalAlpha=1-v.rel;
+      ctx.strokeStyle='#ffffff'; ctx.lineWidth=6*(1-v.rel)+1;
+      ctx.beginPath(); ctx.arc(r.x,r.y,W*0.9*easeOutCubic(v.rel),0,Math.PI*2); ctx.stroke();
+      ctx.strokeStyle='#38bdf8'; ctx.lineWidth=3;
+      ctx.beginPath(); ctx.arc(r.x,r.y,W*0.7*easeOutCubic(v.rel),0,Math.PI*2); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
   // Small, brief camera shake used for impacts/explosions - magnitude decays
   // linearly to 0 by `until`. Multiple calls take whichever shake is currently
   // strongest so rapid multi-hits don't fight each other.
   triggerShake(mag,dur){
     dur=dur||0.2;
-    const untilT=this.t+dur;
+    const untilT=this.fxT+dur;
     if(mag>=this.shakeMag || untilT>this.shakeUntil){
       this.shakeMag=Math.max(mag,this.shakeMag*0.4);
       this.shakeUntil=untilT;
@@ -57,52 +291,158 @@ class GameEngine{
     const built=mapDef.build(this.w,this.h);
     this.mapObstacles=built.obstacles;
     this.mapPortals=built.portals;
+    // Moving Walls (and any future map with a `spawner`) periodically grows
+    // extra temporary walls at random spots - reset that timer fresh
+    // whenever a map is (re)built, e.g. on match start or on resize.
+    this.mapSpawner=mapDef.spawner||null;
+    this.spawnTimer=this.mapSpawner ? this._rollSpawnDelay() : 0;
+    // place sliding walls at exactly the spot the sim will start them from
+    // (they used to sit at their raw build position and then teleport to a
+    // random point on their sine track on the first sim frame)
+    this._positionMovers(this.phase==='sim' ? this.t-this.simT0 : 0);
   }
+  _positionMovers(elapsed){
+    for(const o of this.mapObstacles){
+      if(o.mover){
+        const m=o.mover;
+        o[m.axis]=m.base+Math.sin(elapsed*m.speed+m.phase)*m.amp;
+      }
+    }
+  }
+  _rollSpawnDelay(){
+    const sp=this.mapSpawner;
+    return sp.interval + (Math.random()*2-1)*sp.jitter;
+  }
+  // Moves every obstacle that has a `mover` (simple bounded sine-wave
+  // patrol), and drives the random "walls sprout out of nowhere" spawner
+  // used by the Moving Walls map: a telegraphed warning outline appears
+  // first (no collision yet), then it solidifies for a while, then it's
+  // removed again - keeps the arena unpredictable without ever being
+  // unfair (players always get a beat of warning before it's dangerous).
+  updateMapObstacles(dt){
+    this._positionMovers(this.t-this.simT0);
+    const sp=this.mapSpawner;
+    if(!sp) return;
+    // telegraph -> solid transition, and expiry of temporary walls
+    for(const o of this.mapObstacles){
+      if(o.temp && o.telegraphUntil!=null && this.t>=o.telegraphUntil){
+        o.telegraphUntil=null; // now solid/collidable
+      }
+    }
+    this.mapObstacles=this.mapObstacles.filter(o=>!(o.temp && o.expireAt!=null && this.t>=o.expireAt));
+    this.spawnTimer-=dt;
+    if(this.spawnTimer<=0){
+      this.spawnTimer=this._rollSpawnDelay();
+      const activeTemp=this.mapObstacles.filter(o=>o.temp).length;
+      if(activeTemp<sp.maxActive) this._spawnRandomWall(sp);
+    }
+  }
+  _spawnRandomWall(sp){
+    const margin=0.12; // keep spawns off the outer edge so they don't merge into the arena wall
+    const size=(sp.minSize+Math.random()*(sp.maxSize-sp.minSize))*this.w;
+    const isCircle=Math.random()<0.5;
+    let obstacle=null;
+    for(let attempt=0; attempt<12 && !obstacle; attempt++){
+      const cx=this.w*(margin+Math.random()*(1-margin*2));
+      const cy=this.h*(margin+Math.random()*(1-margin*2));
+      // don't sprout a wall on top of either ball
+      const tooCloseToBall=this.balls.some(b=>b.alive && dist(cx,cy,b.x,b.y)<size+b.radius+40);
+      if(tooCloseToBall) continue;
+      obstacle=isCircle
+        ? {type:'circle',x:cx,y:cy,r:size*0.5}
+        : {type:'rect',x:cx-size/2,y:cy-size*0.36,w:size,h:size*0.72};
+    }
+    if(!obstacle) return; // arena too crowded right now - just skip this cycle
+    obstacle.temp=true;
+    obstacle.telegraphUntil=this.t+sp.telegraph;
+    obstacle.expireAt=this.t+sp.telegraph+sp.life;
+    this.mapObstacles.push(obstacle);
+  }
+  // Fits the (fixed-size) arena onto whatever space the layout gives #canvasHost.
+  // Works for portrait phones, landscape phones, tablets and desktops alike -
+  // the CSS grid decides how much room there is, we just take the largest
+  // square that fits. The physics world itself never changes size, so nothing
+  // here needs the map to be rebuilt (and temp walls survive a screen rotation).
   resize(){
     const host=document.getElementById('canvasHost');
-    const maxW=Math.min(window.innerWidth*0.92, 860);
-    const maxH=Math.min(window.innerHeight*0.68, 620);
-    const size=Math.min(maxW,maxH);
-    this.canvas.width=size; this.canvas.height=size;
-    this.w=size; this.h=size;
+    const r=host.getBoundingClientRect();
+    let cssSize=Math.floor(Math.min(r.width, r.height, MAX_CANVAS_CSS));
+    // host is hidden (another screen is showing) -> keep the last good size
+    if(!(cssSize>40)) cssSize=this.cssSize||Math.min(300,WORLD_SIZE);
+    const dpr=Math.min(window.devicePixelRatio||1, MAX_DPR);
+    const bitmap=Math.round(cssSize*dpr);
+    if(this.canvas.width!==bitmap || this.canvas.height!==bitmap){
+      this.canvas.width=bitmap; this.canvas.height=bitmap; // (also clears the canvas)
+    }
+    this.canvas.style.width=cssSize+'px';
+    this.canvas.style.height=cssSize+'px';
+    this.cssSize=cssSize;
+    this.viewScale=cssSize/WORLD_SIZE;
+    this.pxScale=bitmap/WORLD_SIZE;
+    // small screens shrink everything, so make the few things that carry
+    // information (aim line, damage numbers) proportionally chunkier
+    this.uiBoost=clamp(0.8/this.viewScale,1,1.6);
+    const worldChanged=(this.w!==WORLD_SIZE || this.h!==WORLD_SIZE);
+    this.w=WORLD_SIZE; this.h=WORLD_SIZE;
+    if(worldChanged && this.mapDef) this.setupMap(this.mapDef);
   }
+  // Input uses Pointer Events, so mouse, touch and stylus all go through the
+  // same code path (no more separate touch/mouse handlers, and no "ghost"
+  // mouse events fired by the browser after a tap).
   _bindInput(){
     const c=this.canvas;
     const getPos=(e)=>{
       const r=c.getBoundingClientRect();
-      const t=(e.touches && e.touches.length)? e.touches[0] : e;
-      const rawX=(t.clientX-r.left)*(c.width/(r.width||1));
-      const rawY=(t.clientY-r.top)*(c.height/(r.height||1));
-      // clamp inside the canvas so dragging past the map edge never
-      // produces out-of-range/NaN coordinates
-      return {x:clamp(rawX,0,c.width), y:clamp(rawY,0,c.height)};
+      // screen px -> world units (the canvas is CSS-scaled, see resize())
+      const rawX=(e.clientX-r.left)*(this.w/(r.width||1));
+      const rawY=(e.clientY-r.top)*(this.h/(r.height||1));
+      // clamp inside the arena so dragging past the edge never produces
+      // out-of-range/NaN coordinates
+      return {x:clamp(rawX,0,this.w), y:clamp(rawY,0,this.h)};
     };
+    const activeBallNow=()=> this.phase==='aim1'? this.balls[0] : this.balls[1];
     const down=(e)=>{
+      if(e.pointerType==='mouse' && e.button!==0) return;
+      if(this._activePointer!=null) return; // a finger is already aiming
       if(this.phase!=='aim1' && this.phase!=='aim2') return;
       // P2 is AI-controlled - the human never gets to drag its ball
       if(this.phase==='aim2' && this.vsAI) return;
       const pos=getPos(e);
-      const activeBall = this.phase==='aim1'? this.balls[0] : this.balls[1];
-      if(dist(pos.x,pos.y,activeBall.x,activeBall.y)<activeBall.radius+40){
-        this.dragging=true; this.dragStart={x:activeBall.x,y:activeBall.y}; this.dragCurrent=pos;
+      const activeBall=activeBallNow();
+      // Grab area: 40 world units for a mouse. For a finger keep at least
+      // ~44 CSS px around the ball, even when the arena is scaled down.
+      const grabPad = e.pointerType==='mouse' ? 40 : Math.max(40, 44/this.viewScale);
+      if(dist(pos.x,pos.y,activeBall.x,activeBall.y)<activeBall.radius+grabPad){
+        this.dragging=true; this._activePointer=e.pointerId;
+        this.dragStart={x:activeBall.x,y:activeBall.y}; this.dragCurrent=pos;
+        try{ c.setPointerCapture(e.pointerId); }catch(_){}
+        e.preventDefault();
       }
     };
     const move=(e)=>{
-      if(!this.dragging) return;
-      if(e.touches && e.touches.length===0) return;
+      if(!this.dragging || e.pointerId!==this._activePointer) return;
       this.dragCurrent=getPos(e);
       e.preventDefault();
     };
-    const up=(e)=>{
-      if(!this.dragging) return;
+    const finish=(e)=>{
+      if(!this.dragging || e.pointerId!==this._activePointer) return;
+      this._activePointer=null;
       this.dragging=false;
+      // pointercancel = the OS took over the touch (call, edge swipe...):
+      // abort the aim instead of firing a shot the player never released
+      if(e.type==='pointercancel') return;
       if(!this.dragStart || !this.dragCurrent) return;
-      const activeBall = this.phase==='aim1'? this.balls[0] : this.balls[1];
+      const activeBall=activeBallNow();
       const dx=this.dragStart.x-this.dragCurrent.x;
       const dy=this.dragStart.y-this.dragCurrent.y;
-      const power=clamp(Math.hypot(dx,dy),0,160);
-      if(power>8){
-        this.launchBall(activeBall, Math.atan2(dy,dx), power/160);
+      const pullDist=Math.hypot(dx,dy);
+      // pull distance only decides whether a shot was actually taken (vs an
+      // accidental tap) - it no longer scales speed at all; every launch
+      // uses the ball's own fixed speed stat regardless of how far you pull.
+      // The threshold is ~12 CSS px so a small finger wobble on a phone
+      // doesn't count as a shot.
+      if(pullDist>Math.max(8, 12/this.viewScale)){
+        this.launchBall(activeBall, Math.atan2(dy,dx));
       }
       if(this.phase==='aim1'){
         if(this.vsAI){
@@ -116,49 +456,57 @@ class GameEngine{
           document.getElementById('statusBar').textContent='Kéo bóng để ngắm — PLAYER 2';
         }
       } else if(this.phase==='aim2'){
-        this.phase='sim';
+        this._beginSim();
         document.getElementById('statusBar').textContent='⚔️ ĐANG GIAO TRANH ⚔️';
       }
     };
-    // bind move/up on window (not just the canvas) so dragging past the
-    // map edge keeps tracking the pointer instead of freezing/erroring
-    c.addEventListener('mousedown',down);
-    window.addEventListener('mousemove',move);
-    window.addEventListener('mouseup',up);
-    c.addEventListener('touchstart',down,{passive:true});
-    window.addEventListener('touchmove',move,{passive:false});
-    window.addEventListener('touchend',up);
-    window.addEventListener('touchcancel',up);
+    c.addEventListener('pointerdown',down);
+    // move/up on window (not just the canvas) so dragging past the arena
+    // edge keeps tracking the pointer instead of freezing
+    window.addEventListener('pointermove',move,{passive:false});
+    window.addEventListener('pointerup',finish);
+    window.addEventListener('pointercancel',finish);
+    // long-press on a phone would otherwise pop up the browser's context menu
+    c.addEventListener('contextmenu',(e)=>e.preventDefault());
   }
   // Shared launch math - `ang` is the world-space direction the ball should
-  // fly in, `powerT` is 0..1 (fraction of max pull strength). Used by both
-  // the human drag-release handler and the AI's own aim routine so they
-  // behave identically once a shot is actually taken.
-  launchBall(ball, ang, powerT){
-    powerT=clamp(powerT,0,1);
-    const launchSpeed = 60 + powerT*(ball.baseSpeed*2.4);
+  // fly in. Speed is always this ball's own maximum speed - the same value
+  // a full-strength pull used to produce - it's just fixed now instead of
+  // scaling with how far you drag. Pull distance only ever decides direction
+  // (and whether you dragged far enough to count as a shot at all).
+  launchBall(ball, ang){
+    const launchSpeed = 60 + ball.baseSpeed*2.4;
     ball.vx=Math.cos(ang)*launchSpeed;
     ball.vy=Math.sin(ang)*launchSpeed;
     lockSpeed(ball, launchSpeed);
   }
   // AI's turn: aim roughly at the opponent (with a little human-like
-  // inaccuracy) and a randomized pull strength, then hand off to 'sim' just
-  // like a real player releasing their drag.
+  // inaccuracy), then hand off to 'sim' just like a real player releasing
+  // their drag. Speed is fixed (see launchBall), so there's no pull-strength
+  // to randomize anymore - only the aim angle varies.
   aiTakeShot(){
     const ball=this.balls[1], target=this.opponentOf(ball);
     if(target){
       const baseAng=Math.atan2(target.y-ball.y, target.x-ball.x);
       const ang=baseAng+rand(-0.16,0.16); // slight aim error, not a perfect laser
-      const powerT=rand(0.62,1.0);
-      this.launchBall(ball, ang, powerT);
+      this.launchBall(ball, ang);
     }
     this.aiFireAt=null;
-    this.phase='sim';
+    this._beginSim();
     document.getElementById('statusBar').textContent='⚔️ ĐANG GIAO TRANH ⚔️';
+  }
+  // Both aiming phases are over: the simulation clock starts here.
+  _beginSim(){
+    this.phase='sim';
+    this.t=Math.max(this.t,SIM_READY_T);
+    this.simT0=this.t;
+    this.timeStop=null; this.timeStopRelease=null;
   }
   start(){
     this.running=true;
     this.t=0;
+    this.simT0=0;
+    this.timeStop=null; this.timeStopRelease=null;
     this.phase='aim1';
     this.winner=null;
     this.aiFireAt=null;
@@ -169,13 +517,50 @@ class GameEngine{
     document.getElementById('btnRematch').style.display='none';
     this._lastTurnPhase=null;
     this.updateTurnGlow();
-    requestAnimationFrame(()=>this.loop());
+    // reset the real-time clock used for delta-time measurement (see loop())
+    // so the first frame of a fresh/rematch game never sees a huge dt caused
+    // by time elapsed since the previous match ended.
+    this._lastFrameTime=null;
+    // BUGFIX: start() used to unconditionally queue a brand-new
+    // requestAnimationFrame chain every time it ran. Because stop() is only
+    // called when returning to the main menu - NOT when a match ends or the
+    // player hits "Đấu lại" (Rematch) - the *previous* match's loop() chain
+    // was still alive and calling itself every frame. Each rematch therefore
+    // stacked one more parallel loop() chain on top of the others, so
+    // update()/render() (and therefore ball movement, collisions and damage)
+    // ran 2x, 3x, 4x... as many times per real animation frame the more
+    // times you replayed - balls got faster and hits doubled up the longer
+    // a session went on. We now only ever kick off ONE loop chain, guarded
+    // by _loopQueued; loop() clears the flag when it actually stops so a
+    // later start() (e.g. after returning to the menu and starting again)
+    // can safely queue a new chain.
+    if(!this._loopQueued){
+      this._loopQueued=true;
+      requestAnimationFrame((ts)=>this.loop(ts));
+    }
   }
   stop(){ this.running=false; }
-  loop(){
-    if(!this.running) return;
-    const dt=Math.min(0.033,1/60);
-    this.t+=dt;
+  loop(ts){
+    if(!this.running){ this._loopQueued=false; return; }
+    // BUGFIX: dt used to be hardcoded to Math.min(0.033, 1/60), which always
+    // evaluates to exactly 1/60s regardless of how much real time actually
+    // passed between frames. requestAnimationFrame fires once per display
+    // refresh, so on a 90Hz/120Hz screen (common on phones) this loop runs
+    // 1.5x/2x more often than on a 60Hz screen while still advancing the
+    // simulation by a fixed 1/60s each time - the whole match (ball speed,
+    // cooldowns, timers...) played out proportionally faster on higher
+    // refresh-rate devices. We now measure the REAL elapsed time between
+    // frames and use that as dt (clamped to avoid a huge jump after the tab
+        // was backgrounded or the device hitched), so match speed is now
+    // identical across every device regardless of its refresh rate.
+    const nowMs = (typeof ts==='number') ? ts : performance.now();
+    if(this._lastFrameTime==null) this._lastFrameTime=nowMs;
+    let dt=(nowMs-this._lastFrameTime)/1000;
+    this._lastFrameTime=nowMs;
+    dt=clamp(dt,0,0.033); // cap at ~1/30s so tab-switch/lag spikes can't cause a huge simulation jump
+    // effect clock always runs; GAME clock is held still while time is stopped
+    this.fxT+=dt;
+    if(!this.timeStop) this.t+=dt;
     if(this.phase!==this._lastTurnPhase){
       this._lastTurnPhase=this.phase;
       this.updateTurnGlow();
@@ -184,8 +569,13 @@ class GameEngine{
       this.aiTakeShot();
     }
     if(this.phase==='sim') this.update(dt);
-    this.render();
-    requestAnimationFrame(()=>this.loop());
+    // purely visual lists are aged on the effect clock in every phase (they
+    // used to be pruned only inside update(), so nothing was ever cleaned up
+    // once the match had ended)
+    this.floatTexts=this.floatTexts.filter(f=>this.fxT<f.until);
+    this.particles=this.particles.filter(p=>this.fxT<p.until);
+    this.render(dt);
+    requestAnimationFrame((ts2)=>this.loop(ts2));
   }
 
   update(dt){
@@ -194,6 +584,15 @@ class GameEngine{
     // ability ticks, projectiles, hazards, explosions, collisions, etc -
     // without needing every single damage call-site to know about visuals.
     const hpBefore=this.balls.map(b=>b.hp);
+    // While a Clock Ball time-stop is active the WHOLE world is frozen: no
+    // ball, projectile, hazard, bomb, train, tornado, wall or ability timer
+    // advances. Only the time-stop itself (the muda-muda barrage) runs.
+    if(this.timeStop) this.updateTimeStop(dt);
+    else this._updateWorld(dt);
+    this._postStep(hpBefore);
+  }
+  _updateWorld(dt){
+    this.updateMapObstacles(dt);
     for(const ball of this.balls){
       if(!ball.alive) continue;
       const mods=ball.currentMods(this);
@@ -206,9 +605,12 @@ class GameEngine{
       // no longer crawls at a reduced rate.
       // ball.state.ccImmune (e.g. Florentino Ball mid-combo) bypasses all of
       // this entirely - such a ball simply cannot be frozen/rooted/stunned,
-      // nor disoriented (see below).
+      // nor disoriented (see below). Clock Ball's time-stop is NOT a per-ball
+      // status any more: it freezes the whole world (see updateTimeStop) so
+      // it needs no per-ball check here and overrides every immunity by
+      // construction.
       if(!ball.state.ccImmune){
-        if(this.t < (ball.state.frozenUntil||0) || this.t < (ball.state.rootUntil||0) || this.t < (ball.state.stunUntil||0)){
+        if(this.t < (ball.state.frozenUntil||0) || this.t < (ball.state.rootUntil||0) || this.t < (ball.state.stunUntil||0) || this.t < (ball.state.potionFrozenUntil||0) || this.t < (ball.state.potionShockUntil||0)){
           localDt=0;
         }
       }
@@ -221,6 +623,16 @@ class GameEngine{
       // integrate position
       ball.x += ball.vx*localDt;
       ball.y += ball.vy*localDt;
+      // temporary shove (Clock Ball's "ORA"): moves the ball on top of its own
+      // velocity and fades out by itself - see applyImpulse() in utils.js
+      const imp=ball.state.impulse;
+      if(imp){
+        ball.x += imp.vx*localDt;
+        ball.y += imp.vy*localDt;
+        const f=Math.exp(-IMPULSE_DECAY*localDt);
+        imp.vx*=f; imp.vy*=f;
+        if(Math.hypot(imp.vx,imp.vy)<12) ball.state.impulse=null;
+      }
 
       // NOTE: no passive friction here on purpose — speed must stay constant
       // over the whole match. It only ever changes from: wall/obstacle bounces,
@@ -244,7 +656,7 @@ class GameEngine{
         if(ball.speedLock<=0) lockSpeed(ball, Math.hypot(ball.vx,ball.vy));
       }
 
-      // poison / burn damage-over-time tick (Poison Spike trap, Potion Ball burn)
+      // poison / burn damage-over-time tick (Poison Spike trap, legacy Potion Ball burn)
       if(this.t < (ball.state.poisonUntil||0)){
         ball.state.poisonTick=(ball.state.poisonTick||0)+dt;
         if(ball.state.poisonTick>0.5){
@@ -252,6 +664,57 @@ class GameEngine{
           const pdmg=ball.state.poisonTickDmg||3;
           ball.hp=Math.max(0,ball.hp-pdmg);
           spawnFloatText(this,ball.x,ball.y-30,'-'+pdmg.toFixed(0),'#8dff7a');
+        }
+      }
+
+      // ---- Potion Ball (redesigned): burn / toxic / frozen / shock / health
+      // ticks. These are generic state fields so ANY ball type can carry
+      // them (whoever got hit by a thrown potion) - no floating "BURN!"-style
+      // labels are shown per the design; only small status icons above the
+      // ball (see render()) communicate what's active, and they can freely
+      // overlap when several effects are stacked at once.
+      if(this.t < (ball.state.potionBurnUntil||0)){
+        ball.state.potionBurnTick=(ball.state.potionBurnTick||0)+dt;
+        if(ball.state.potionBurnTick>0.3){
+          ball.state.potionBurnTick=0;
+          ball.hp=Math.max(0,ball.hp-3);
+          spawnParticles(this,ball.x,ball.y,4,{color:'#ff8a3d',type:'spark',speed:80});
+        }
+      }
+      if(this.t < (ball.state.potionToxicUntil||0)){
+        ball.state.potionToxicTick=(ball.state.potionToxicTick||0)+dt;
+        if(ball.state.potionToxicTick>0.3){
+          ball.state.potionToxicTick=0;
+          const pd=ball.state.potionToxicDmg||3;
+          ball.hp=Math.max(0,ball.hp-pd);
+          ball.state.potionToxicDmg=pd+3; // ramps up each tick while active
+          spawnParticles(this,ball.x,ball.y,4,{color:'#7CFF3A',type:'spark',speed:80});
+        }
+      } else if(ball.state.potionToxicDmg){
+        ball.state.potionToxicDmg=3; // resets once the effect wears off
+      }
+      if(this.t < (ball.state.potionFrozenUntil||0)){
+        ball.state.potionFrozenTick=(ball.state.potionFrozenTick||0)+dt;
+        if(ball.state.potionFrozenTick>0.2){
+          ball.state.potionFrozenTick=0;
+          ball.hp=Math.max(0,ball.hp-1);
+          spawnParticles(this,ball.x,ball.y,3,{color:'#8fdcff',type:'spark',speed:60});
+        }
+      }
+      if(this.t < (ball.state.potionShockUntil||0)){
+        ball.state.potionShockTick=(ball.state.potionShockTick||0)+dt;
+        if(ball.state.potionShockTick>0.2){
+          ball.state.potionShockTick=0;
+          ball.hp=Math.max(0,ball.hp-1);
+          spawnParticles(this,ball.x,ball.y,3,{color:'#fff36a',type:'spark',speed:100});
+        }
+      }
+      if(this.t < (ball.state.potionHealthUntil||0)){
+        ball.state.potionHealthTick=(ball.state.potionHealthTick||0)+dt;
+        if(ball.state.potionHealthTick>0.3){
+          ball.state.potionHealthTick=0;
+          ball.hp=Math.min(ball.maxHp,ball.hp+7);
+          spawnParticles(this,ball.x,ball.y,4,{color:'#7CFF9A',type:'glow',speed:40});
         }
       }
 
@@ -263,6 +726,9 @@ class GameEngine{
       enforceSpeedLock(ball, mods.speedMult);
     }
     this.resolveBallCollision();
+    // a time-stop that started in this collision freezes everything from
+    // this exact moment - don't let projectiles/hazards/etc. tick one last frame
+    if(this.timeStop) return;
     this.updateProjectiles(dt);
     this.updateHazards(dt);
     this.updateBombs();
@@ -271,9 +737,9 @@ class GameEngine{
     this.updateTornadoes(dt);
     this.explosions=this.explosions.filter(e=>this.t-e.start<e.dur);
 
-    this.floatTexts=this.floatTexts.filter(f=>this.t<f.until);
-    this.particles=this.particles.filter(p=>this.t<p.until);
-
+  }
+  // runs after EVERY sim frame, whether the world advanced or time was stopped
+  _postStep(hpBefore){
     // universal hit-reaction: any ball that lost HP this frame (from any
     // source) gets a brief white flash + a squash pop + a burst of sparks in
     // its own color + a proportional screen shake. This makes every one of
@@ -299,8 +765,8 @@ class GameEngine{
           if(ball.state.momentum<=0) ball.hp=0;
           dmg=1;
         }
-        ball.state.flashUntil=this.t+0.14;
-        ball.state.hitPopAt=this.t;
+        ball.state.flashUntil=this.fxT+0.14;
+        ball.state.hitPopAt=this.fxT;
         this.triggerShake(clamp(2+dmg*0.35,2,11), 0.16);
         spawnParticles(this,ball.x,ball.y,clamp(Math.round(3+dmg*0.35),3,14),{color:ball.color,speed:190,type:'spark'});
       }
@@ -360,6 +826,7 @@ class GameEngine{
     if(target.def.modifyIncoming && powerOk(target,this)) dmg=target.def.modifyIncoming(target,attacker,dmg,this,'projectile');
     dmg=applyVulnerability(target,dmg,this);
     dmg=applyStunPenalty(attacker,dmg,this);
+    dmg=applyBurnPenalty(attacker,dmg,this);
     target.hp=Math.max(0,target.hp-dmg);
     if(attacker.def.onDealDamage && powerOk(attacker,this)) attacker.def.onDealDamage(attacker,target,dmg,this);
     if(target.def.onTakeDamage && powerOk(target,this)) target.def.onTakeDamage(target,attacker,dmg,this);
@@ -575,10 +1042,10 @@ class GameEngine{
     // Walls are always perfectly elastic - a bounce only ever flips
     // direction, never speed.
     const rest = 1.0;
-    if(ball.x-r<0){ ball.x=r; ball.vx=Math.abs(ball.vx)*rest; hit=true; normal={x:1,y:0}; }
-    if(ball.x+r>this.w){ ball.x=this.w-r; ball.vx=-Math.abs(ball.vx)*rest; hit=true; normal={x:-1,y:0}; }
-    if(ball.y-r<0){ ball.y=r; ball.vy=Math.abs(ball.vy)*rest; hit=true; normal={x:0,y:1}; }
-    if(ball.y+r>this.h){ ball.y=this.h-r; ball.vy=-Math.abs(ball.vy)*rest; hit=true; normal={x:0,y:-1}; }
+    if(ball.x-r<0){ ball.x=r; ball.vx=Math.abs(ball.vx)*rest; hit=true; normal={x:1,y:0}; this._bounceImpulse(ball,1,0); }
+    if(ball.x+r>this.w){ ball.x=this.w-r; ball.vx=-Math.abs(ball.vx)*rest; hit=true; normal={x:-1,y:0}; this._bounceImpulse(ball,-1,0); }
+    if(ball.y-r<0){ ball.y=r; ball.vy=Math.abs(ball.vy)*rest; hit=true; normal={x:0,y:1}; this._bounceImpulse(ball,0,1); }
+    if(ball.y+r>this.h){ ball.y=this.h-r; ball.vy=-Math.abs(ball.vy)*rest; hit=true; normal={x:0,y:-1}; this._bounceImpulse(ball,0,-1); }
     if(hit){
       clampBallSpeed(ball);
       // Charge Ball "slam" debuff: victim takes a fixed hit + stun + dust burst
@@ -596,8 +1063,16 @@ class GameEngine{
       if(ball.def.onWallHit && powerOk(ball,this)) ball.def.onWallHit(ball,this,normal);
     }
   }
+  // a temporary impulse bounces off walls/obstacles like the ball itself does
+  _bounceImpulse(ball,nx,ny){
+    const imp=ball.state.impulse;
+    if(!imp) return;
+    const dot=imp.vx*nx+imp.vy*ny;
+    if(dot<0){ imp.vx-=2*dot*nx; imp.vy-=2*dot*ny; }
+  }
   resolveObstacleCollision(ball){
     for(const o of this.mapObstacles){
+      if(o.telegraphUntil!=null) continue; // still just a warning outline - not solid yet
       if(o.type==='circle'){
         const d=dist(ball.x,ball.y,o.x,o.y);
         const minD=ball.radius+o.r;
@@ -606,6 +1081,7 @@ class GameEngine{
           ball.x=o.x+nx*minD; ball.y=o.y+ny*minD;
           const dot=ball.vx*nx+ball.vy*ny;
           ball.vx -= 2*dot*nx; ball.vy -= 2*dot*ny;
+          this._bounceImpulse(ball,nx,ny);
           clampBallSpeed(ball);
           if(ball.def.onWallHit && powerOk(ball,this)) ball.def.onWallHit(ball,this,{x:nx,y:ny});
         }
@@ -618,6 +1094,7 @@ class GameEngine{
           ball.x=nx+dirx*ball.radius; ball.y=ny+diry*ball.radius;
           const dot=ball.vx*dirx+ball.vy*diry;
           ball.vx -= 2*dot*dirx; ball.vy -= 2*dot*diry;
+          this._bounceImpulse(ball,dirx,diry);
           clampBallSpeed(ball);
           if(ball.def.onWallHit && powerOk(ball,this)) ball.def.onWallHit(ball,this,{x:dirx,y:diry});
         }
@@ -681,8 +1158,15 @@ class GameEngine{
       const collisionICD=0.25;
       if(!a.state.lastCollide || this.t-a.state.lastCollide>collisionICD){
         a.state.lastCollide=this.t; b.state.lastCollide=this.t;
-        if(a.def.onBallCollide && powerOk(a,this)) a.def.onBallCollide(a,b,this);
-        if(b.def.onBallCollide && powerOk(b,this)) b.def.onBallCollide(b,a,this);
+        // Balls flagged collidePriority (Clock Ball) get their collision hook
+        // first, so the result never depends on which player slot a ball is
+        // in: if Clock Ball's time-stop fires on this hit, the victim is
+        // powerless (see powerOk) and its own on-collision ability is
+        // consistently skipped whether it is P1 or P2.
+        const order=((b.def.collidePriority||0)>(a.def.collidePriority||0)) ? [[b,a],[a,b]] : [[a,b],[b,a]];
+        for(const [self,foe] of order){
+          if(self.def.onBallCollide && powerOk(self,this)) self.def.onBallCollide(self,foe,this);
+        }
         this.applyCombatDamage(a,b,relSpeed);
         this.applyCombatDamage(b,a,relSpeed);
         clampBallSpeed(a); clampBallSpeed(b);
@@ -703,6 +1187,7 @@ class GameEngine{
     if(defender.def.modifyIncoming && powerOk(defender,this)) dmg=defender.def.modifyIncoming(defender,attacker,dmg,this,'collision');
     dmg=applyVulnerability(defender,dmg,this);
     dmg=applyStunPenalty(attacker,dmg,this);
+    dmg=applyBurnPenalty(attacker,dmg,this);
     defender.hp=Math.max(0,defender.hp-dmg);
     if(attacker.def.onDealDamage && powerOk(attacker,this)) attacker.def.onDealDamage(attacker,defender,dmg,this);
     if(defender.def.onTakeDamage && powerOk(defender,this)) defender.def.onTakeDamage(defender,attacker,dmg,this);
@@ -744,6 +1229,11 @@ class GameEngine{
 
   endMatch(winnerBall){
     this.phase='end';
+    if(this.timeStop){
+      this.timeStop=null; this.timeStopRelease=null;
+      const bar=document.getElementById('statusBar');
+      if(bar) bar.textContent='⚔️ ĐANG GIAO TRANH ⚔️';
+    }
     const msg=document.getElementById('roundMsg');
     msg.style.display='block';
     const col=winnerBall.player===1?'#d94f4f':'#3d6fd9';
@@ -758,25 +1248,30 @@ class GameEngine{
       this.particles.push({
         x:rand(0,this.w), y:rand(-60,-10),
         vx:rand(-30,30), vy:rand(90,180),
-        r:rand(4,7), born:this.t, until:this.t+rand(1.6,2.6),
+        r:rand(4,7), born:this.fxT, until:this.fxT+rand(1.6,2.6),
         color:Math.random()<0.5?col:(Math.random()<0.5?'#ffd166':'#ffffff'),
         type:'confetti', gravity:70, rot:rand(0,Math.PI*2), rotSpeed:rand(-5,5)
       });
     }
   }
 
-  render(){
+  render(dt){
+    // Fallback so any other/older call site that still calls render() with
+    // no argument keeps behaving exactly like before (assume ~60fps).
+    if(dt==null) dt=1/60;
     const ctx=this.ctx;
+    // draw in world units; pxScale maps them onto the (DPR-sized) bitmap
+    ctx.setTransform(this.pxScale,0,0,this.pxScale,0,0);
     ctx.clearRect(0,0,this.w,this.h);
     ctx.save();
 
     // ---- screen shake (impacts/explosions) ----
     let shakeX=0, shakeY=0;
-    if(this.t<this.shakeUntil && this.shakeMag>0){
-      const remain=(this.shakeUntil-this.t);
+    if(this.fxT<this.shakeUntil && this.shakeMag>0){
+      const remain=(this.shakeUntil-this.fxT);
       const k=this.shakeMag*Math.min(1,remain/0.22);
-      shakeX=(Math.sin(this.t*53+this.shakeSeed)+Math.sin(this.t*97))*0.5*k;
-      shakeY=(Math.cos(this.t*61+this.shakeSeed)+Math.cos(this.t*83))*0.5*k;
+      shakeX=(Math.sin(this.fxT*53+this.shakeSeed)+Math.sin(this.fxT*97))*0.5*k;
+      shakeY=(Math.cos(this.fxT*61+this.shakeSeed)+Math.cos(this.fxT*83))*0.5*k;
       ctx.translate(shakeX,shakeY);
     } else { this.shakeMag=0; }
 
@@ -835,11 +1330,32 @@ class GameEngine{
     // read with a touch of depth
     for(const o of this.mapObstacles){
       ctx.save();
+      if(o.telegraphUntil!=null){
+        // warning telegraph: a pulsing dashed outline where a wall is about
+        // to sprout - not solid yet, purely a heads-up for the player
+        const pulse=0.6+0.4*Math.sin(this.t*10);
+        ctx.globalAlpha=0.55+0.25*pulse;
+        ctx.setLineDash([6,5]); ctx.lineDashOffset=-this.t*20;
+        ctx.strokeStyle='#e0862b'; ctx.lineWidth=2.5;
+        ctx.beginPath();
+        if(o.type==='circle'){ ctx.arc(o.x,o.y,o.r,0,Math.PI*2); }
+        else { ctx.rect(o.x,o.y,o.w,o.h); }
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+        continue;
+      }
+      // temp walls fade out gently over their last moments instead of
+      // just popping out of existence
+      if(o.temp && o.expireAt!=null){
+        const remain=o.expireAt-this.t;
+        if(remain<0.5) ctx.globalAlpha=Math.max(0,remain/0.5);
+      }
       ctx.shadowColor='rgba(0,0,0,0.18)'; ctx.shadowBlur=10; ctx.shadowOffsetY=4;
       const cx=o.type==='circle'?o.x:o.x+o.w/2, cy=o.type==='circle'?o.y:o.y+o.h/2;
       const rr=o.type==='circle'?o.r:Math.max(o.w,o.h)/2;
       const grad=ctx.createRadialGradient(cx-rr*0.35,cy-rr*0.35,rr*0.1,cx,cy,rr*1.15);
-      grad.addColorStop(0,'#f4f4f0'); grad.addColorStop(1,'#d8d8d0');
+      grad.addColorStop(0, o.temp?'#fff2df':'#f4f4f0'); grad.addColorStop(1, o.temp?'#e8c896':'#d8d8d0');
       ctx.beginPath();
       if(o.type==='circle'){ ctx.arc(o.x,o.y,o.r,0,Math.PI*2); }
       else { ctx.rect(o.x,o.y,o.w,o.h); }
@@ -902,6 +1418,20 @@ class GameEngine{
         ctx.fillStyle=`rgba(217,79,79,${0.16*pulse})`; ctx.fillRect(hz.x,hz.y,hz.w,hz.h);
         ctx.strokeStyle='#d94f4f'; ctx.lineWidth=2; ctx.setLineDash([5,4]); ctx.lineDashOffset=-this.t*14;
         ctx.strokeRect(hz.x,hz.y,hz.w,hz.h); ctx.setLineDash([]);
+      } else if(hz.type==='leafpatch'){
+        // a single fallen leaf, not a generic glow blob - small rotated
+        // leaf shape that settles then fades near the end of its life
+        const life=clamp((hz.until-this.t)/1.4,0,1);
+        ctx.shadowColor='#6fbf3f'; ctx.shadowBlur=8;
+        ctx.globalAlpha=0.35+0.5*life;
+        ctx.translate(hz.x,hz.y); ctx.rotate((hz._rot=hz._rot||Math.random()*Math.PI*2));
+        ctx.fillStyle= life>0.5?'#6fbf3f':'#a3874a';
+        ctx.beginPath();
+        ctx.moveTo(0,-hz.r*0.9); ctx.quadraticCurveTo(hz.r*0.7,0,0,hz.r*0.9);
+        ctx.quadraticCurveTo(-hz.r*0.7,0,0,-hz.r*0.9);
+        ctx.fill();
+        ctx.strokeStyle='rgba(255,255,255,0.25)'; ctx.lineWidth=1;
+        ctx.beginPath(); ctx.moveTo(0,-hz.r*0.85); ctx.lineTo(0,hz.r*0.85); ctx.stroke();
       }
       ctx.restore();
     }
@@ -912,8 +1442,10 @@ class GameEngine{
     // path; anything without a shape keeps the plain glowing-dot look.
     for(const pr of this.projectiles){
       pr._trail=pr._trail||[];
-      pr._trail.unshift({x:pr.x,y:pr.y});
-      if(pr._trail.length>6) pr._trail.length=6;
+      if(!this.timeStop){ // frozen shots keep their streak instead of collapsing it into a dot
+        pr._trail.unshift({x:pr.x,y:pr.y});
+        if(pr._trail.length>6) pr._trail.length=6;
+      }
       for(let i=pr._trail.length-1;i>=0;i--){
         const a=(1-i/pr._trail.length)*0.35;
         ctx.beginPath(); ctx.arc(pr._trail[i].x,pr._trail[i].y,pr.r*(1-i*0.1),0,Math.PI*2);
@@ -983,7 +1515,7 @@ class GameEngine{
         ctx.strokeStyle='rgba(230,180,110,0.4)'; ctx.lineWidth=2; ctx.setLineDash([5,5]); ctx.stroke(); ctx.setLineDash([]);
       }
       // steam puffs drifting up and away from the engine
-      tr._smokeT=(tr._smokeT||0)+0.016;
+      if(!this.timeStop) tr._smokeT=(tr._smokeT||0)+0.016;
       for(let i=0;i<3;i++){
         const age=(tr._smokeT*1.3+i*0.5)%1.5;
         const puffR=6+age*10;
@@ -1149,51 +1681,52 @@ class GameEngine{
       ctx.fillText('🤖', ball.x, ball.y-ball.radius-22-Math.sin(this.t*5)*3);
       ctx.restore();
     }
-    // aim trajectory preview — glowing gradient shot line + arrowhead +
-    // a power ring around the ball so the pull feels tactile
+    // aim trajectory preview — glowing gradient shot line + arrowhead. No
+    // more "power ring" here: speed is fixed per ball now, so how far you
+    // pull only sets the direction/preview length, never how hard it launches.
     if(this.dragging){
       const activeBall = this.phase==='aim1'? this.balls[0]: this.balls[1];
       const turnCol = this.phase==='aim1' ? '#d94f4f' : '#3d6fd9';
       const dx=this.dragStart.x-this.dragCurrent.x;
       const dy=this.dragStart.y-this.dragCurrent.y;
-      const power=clamp(Math.hypot(dx,dy),0,160);
-      const powerT=power/160;
+      const ub=this.uiBoost; // chunkier aim visuals on small screens
       const aimLen=1.4;
       const ex=activeBall.x+dx*aimLen, ey=activeBall.y+dy*aimLen;
 
       ctx.save();
-      // power ring pulsing around the ball, fills up as you pull harder
+      // plain static aim ring around the ball - just marks "you're aiming",
+      // doesn't fill/charge since pull strength no longer does anything
       ctx.beginPath(); ctx.arc(activeBall.x,activeBall.y,activeBall.radius+14,0,Math.PI*2);
-      ctx.strokeStyle=rgba(turnCol,0.25); ctx.lineWidth=3; ctx.stroke();
-      ctx.beginPath(); ctx.arc(activeBall.x,activeBall.y,activeBall.radius+14,-Math.PI/2,-Math.PI/2+Math.PI*2*powerT);
-      ctx.shadowColor=turnCol; ctx.shadowBlur=10;
-      ctx.strokeStyle=turnCol; ctx.lineWidth=3; ctx.stroke();
+      ctx.shadowColor=turnCol; ctx.shadowBlur=8;
+      ctx.strokeStyle=rgba(turnCol,0.55); ctx.lineWidth=3; ctx.stroke();
       ctx.shadowBlur=0;
 
-      // dashed predicted-path line with a marching-ants animation, glow tinted
-      // by the current pull strength
+      // dashed predicted-path line with a marching-ants animation
       const lineGrad=ctx.createLinearGradient(activeBall.x,activeBall.y,ex,ey);
       lineGrad.addColorStop(0,rgba(turnCol,0.9));
       lineGrad.addColorStop(1,rgba(turnCol,0.15));
-      ctx.setLineDash([9,7]); ctx.lineDashOffset=-this.t*40;
-      ctx.strokeStyle=lineGrad; ctx.lineWidth=2.5;
+      ctx.setLineDash([9*ub,7*ub]); ctx.lineDashOffset=-this.t*40;
+      ctx.strokeStyle=lineGrad; ctx.lineWidth=2.5*ub;
       ctx.beginPath(); ctx.moveTo(activeBall.x,activeBall.y); ctx.lineTo(ex,ey); ctx.stroke();
       ctx.setLineDash([]);
 
       // arrowhead at the tip of the predicted path
       const ang=Math.atan2(ey-activeBall.y,ex-activeBall.x);
       ctx.translate(ex,ey); ctx.rotate(ang);
-      ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(-12,-6); ctx.lineTo(-12,6); ctx.closePath();
+      ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(-12*ub,-6*ub); ctx.lineTo(-12*ub,6*ub); ctx.closePath();
       ctx.fillStyle=turnCol; ctx.fill();
       ctx.restore();
 
       // drag handle line to cursor - subtle, secondary
       ctx.beginPath();
-      ctx.strokeStyle='rgba(201,138,47,0.8)'; ctx.lineWidth=2;
+      ctx.strokeStyle='rgba(201,138,47,0.8)'; ctx.lineWidth=2*ub;
       ctx.moveTo(activeBall.x,activeBall.y);
       ctx.lineTo(this.dragCurrent.x,this.dragCurrent.y);
       ctx.stroke();
     }
+
+    // Clock Ball time-stop: inverted arena + giant rotating clock, BEHIND the balls
+    this._renderTimeStopBack(ctx);
 
     // balls - own body shape per type, now with a soft grounded shadow, a
     // subtle 3D-ish sheen gradient, a colored rim glow, a low-HP warning
@@ -1206,7 +1739,9 @@ class GameEngine{
       // motion trail: a few fading ghost silhouettes behind fast-moving balls
       const spd=Math.hypot(ball.vx,ball.vy);
       ball.state.trail=ball.state.trail||[];
-      if(this.phase==='sim' && spd>60){
+      if(this.timeStop){
+        // time is stopped: the ghost trail stays exactly as it was
+      } else if(this.phase==='sim' && spd>60){
         ball.state.trail.unshift({x:ball.x,y:ball.y});
         if(ball.state.trail.length>5) ball.state.trail.length=5;
       } else if(ball.state.trail.length){ ball.state.trail.pop(); }
@@ -1219,7 +1754,7 @@ class GameEngine{
       }
 
       // hit-pop squash/stretch scale, decaying quickly back to 1
-      const popAge=this.t-(ball.state.hitPopAt||-99);
+      const popAge=this.fxT-(ball.state.hitPopAt||-99);
       const pop = popAge<0.16 ? 1+ (1-popAge/0.16)*0.16 : 1;
 
       ctx.save();
@@ -1232,7 +1767,7 @@ class GameEngine{
 
       // colored rim glow behind the body (player color, so it doubles as an
       // owner cue) - stronger if low HP / just hit
-      const flashT=clamp((ball.state.flashUntil||0)-this.t,0,0.14)/0.14;
+      const flashT=clamp((ball.state.flashUntil||0)-this.fxT,0,0.14)/0.14;
       const glowStrength = 14 + (lowHp?10*(0.6+0.4*Math.sin(this.t*8)):0) + flashT*14;
       ctx.shadowColor= lowHp? '#ff3b3b' : ball.color;
       ctx.shadowBlur=glowStrength;
@@ -1244,6 +1779,10 @@ class GameEngine{
       // runtime (e.g. Werewolf Ball's human/wolf forms) without mutating
       // the shared `def` object that every instance of that type points to
       const bodyColor=ball.bodyColorOverride||ball.def.color||ball.color;
+      // bodyAlphaOverride mirrors bodyColorOverride: lets a ball type fade
+      // its own solid body mid-ability (e.g. Leaf Ball dissolving into a
+      // leaf swirl) without touching the shared `def`.
+      ctx.globalAlpha = ball.bodyAlphaOverride!=null ? ball.bodyAlphaOverride : 1;
       drawFlatShape(ctx,ball.def.shape,ball.x,ball.y,ball.radius);
       const grad=ctx.createRadialGradient(
         ball.x-ball.radius*0.35, ball.y-ball.radius*0.4, ball.radius*0.15,
@@ -1281,16 +1820,68 @@ class GameEngine{
         ctx.strokeStyle=`rgba(255,59,59,${0.35+pr*0.35})`; ctx.lineWidth=2; ctx.stroke();
       }
 
+      // time-frozen overlay: generic to ANY ball type (opponent caught by
+      // Clock Ball's time-stop) - icy-cyan desaturating wash + a stopped
+      // clock-hand glyph, independent of that ball's own renderExtra so it
+      // reads the same no matter which ball got frozen.
+      if(this.timeStop && this.timeStop.target===ball){
+        ctx.save();
+        ctx.globalAlpha=0.45;
+        ctx.beginPath(); ctx.arc(ball.x,ball.y,ball.radius,0,Math.PI*2);
+        ctx.fillStyle='rgba(125,211,252,0.35)'; ctx.fill();
+        ctx.globalAlpha=0.9;
+        ctx.strokeStyle='#7dd3fc'; ctx.lineWidth=2; ctx.setLineDash([3,3]);
+        ctx.beginPath(); ctx.arc(ball.x,ball.y,ball.radius+5,0,Math.PI*2); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+
+      // Potion Ball status icons - generic to ANY ball type that got hit by
+      // a thrown potion (or, for the health icon, the thrower buffing
+      // itself). No text label per the design - just small icon chips above
+      // the ball, freely overlapping when several effects stack at once.
+      {
+        const potionIcons=[];
+        if(this.t<(ball.state.potionBurnUntil||0)) potionIcons.push({icon:'🔥',color:'#ff8a3d'});
+        if(this.t<(ball.state.potionToxicUntil||0)) potionIcons.push({icon:'☠️',color:'#7CFF3A'});
+        if(this.t<(ball.state.potionFrozenUntil||0)) potionIcons.push({icon:'❄️',color:'#8fdcff'});
+        if(this.t<(ball.state.potionShockUntil||0)) potionIcons.push({icon:'⚡',color:'#fff36a'});
+        if(this.t<(ball.state.potionHealthUntil||0)) potionIcons.push({icon:'💚',color:'#7CFF9A'});
+        if(potionIcons.length){
+          const iconR=9, spacing=12;
+          const totalW=(potionIcons.length-1)*spacing;
+          const baseY=ball.y-ball.radius-16;
+          potionIcons.forEach((pi,idx)=>{
+            const ix=ball.x-totalW/2+idx*spacing;
+            ctx.save();
+            ctx.shadowColor=pi.color; ctx.shadowBlur=6;
+            ctx.beginPath(); ctx.arc(ix,baseY,iconR,0,Math.PI*2);
+            ctx.fillStyle='rgba(255,255,255,0.9)'; ctx.fill();
+            ctx.lineWidth=1; ctx.strokeStyle=pi.color; ctx.stroke();
+            ctx.shadowBlur=0;
+            ctx.font='12px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+            ctx.fillText(pi.icon,ix,baseY+1);
+            ctx.restore();
+          });
+        }
+      }
+
       // per-ball custom visuals (orbit blades, tail, aura ring, shield, minion...)
       if(ball.def.renderExtra) ball.def.renderExtra(ball,this,ctx);
+    }
+    // second pass: effects that must sit ABOVE every ball body (e.g. Clock
+    // Ball's flying fists landing on the opponent, which may be drawn later
+    // than the puncher in the ball order)
+    for(const ball of this.balls){
+      if(ball.def.renderTop) ball.def.renderTop(ball,this,ctx);
     }
 
 
     // particles — spark / glow / dust flavors, glowing, with drift+gravity
     for(const p of this.particles){
-      const a=clamp((p.until-this.t)/((p.until-p.born)||0.4),0,1);
-      p.x += (p.vx||0)*0.0166; p.y += (p.vy||0)*0.0166;
-      if(p.gravity) p.vy += p.gravity*0.0166;
+      const a=clamp((p.until-this.fxT)/((p.until-p.born)||0.4),0,1);
+      p.x += (p.vx||0)*dt; p.y += (p.vy||0)*dt;
+      if(p.gravity) p.vy += p.gravity*dt;
       ctx.save();
       if(p.type==='glow'){
         ctx.shadowColor=p.color; ctx.shadowBlur=10;
@@ -1302,7 +1893,7 @@ class GameEngine{
         ctx.fillStyle=p.color;
         ctx.fillRect(p.x-p.r*0.5,p.y-p.r*0.5,p.r,p.r);
       } else if(p.type==='confetti'){
-        p.rot=(p.rot||0)+(p.rotSpeed||0)*0.0166;
+        p.rot=(p.rot||0)+(p.rotSpeed||0)*dt;
         ctx.globalAlpha=a;
         ctx.translate(p.x,p.y); ctx.rotate(p.rot);
         ctx.fillStyle=p.color;
@@ -1319,15 +1910,15 @@ class GameEngine{
     // soft outline for legibility, colored glow
     ctx.textAlign='center';
     for(const f of this.floatTexts){
-      const age=this.t-f.born;
+      const age=this.fxT-f.born;
       const dur=f.until-f.born;
       const progress=clamp(age/dur,0,1);
-      const scale = age<0.12 ? easeOutBack(age/0.12) : 1;
+      const scale = age<0.12 ? Math.max(0.05,easeOutBack(age/0.12)) : 1; // never scale(0,0) on the spawn frame
       ctx.save();
       ctx.globalAlpha=clamp(1-Math.max(0,progress-0.55)/0.45,0,1);
       const fx=f.x+(f.drift||0)*progress, fy=f.y-progress*32;
       ctx.translate(fx,fy); ctx.scale(scale,scale);
-      ctx.font='800 16px sans-serif';
+      ctx.font='800 '+Math.round(16*this.uiBoost)+'px sans-serif';
       ctx.lineJoin='round';
       ctx.lineWidth=3.5; ctx.strokeStyle='rgba(255,255,255,0.85)';
       ctx.strokeText(f.text,0,0);
@@ -1336,6 +1927,8 @@ class GameEngine{
       ctx.fillText(f.text,0,0);
       ctx.restore();
     }
+    // Clock Ball time-stop: vignette, caption, flashes - on top of everything
+    this._renderTimeStopFront(ctx);
     ctx.restore(); // matches the shake-transform save() at the top of render()
   }
 }

@@ -6,11 +6,44 @@ const GROUP_META = {
 };
 
 /* ---------------------------- BALL DEFINITIONS --------------------------- */
+// shared by Potion Ball's normal (rolled) throw and its auto-throw at a full
+// energy bar - picks `count` unique potion types at random and applies each
+// one (burn/toxic/frozen/shock land on `other`, health self-buffs `b`),
+// then resets the energy bar and plays a shared throw VFX.
+function throwPotions(b,other,g,count){
+  const pool=['burn','health','toxic','frozen','shock'];
+  for(let i=pool.length-1;i>0;i--){ const j=randi(0,i); [pool[i],pool[j]]=[pool[j],pool[i]]; }
+  const chosen=pool.slice(0,count);
+  for(const type of chosen){
+    if(type==='burn') other.state.potionBurnUntil=g.t+1;
+    else if(type==='toxic') other.state.potionToxicUntil=g.t+1;
+    else if(type==='frozen') other.state.potionFrozenUntil=g.t+1;
+    else if(type==='shock') other.state.potionShockUntil=g.t+1;
+    else if(type==='health') b.state.potionHealthUntil=g.t+1;
+  }
+  g.spawnExplosionRing(b.x,b.y,b.radius+18,'62,207,158','185,255,225');
+  spawnParticles(g,(b.x+other.x)/2,(b.y+other.y)/2,4+count*3,{color:'#3ecf9e',type:'glow',speed:150});
+  b.state.potionEnergy=0;
+}
+// shared by Leaf Ball's two trigger paths (onBallCollide + the 3s auto-timer)
+function startLeafScatter(b,g){
+  const R=b.radius;
+  b.state.leafPhase='scatter';
+  b.state.leafTimer=0;
+  b.state.leafDropCD=0;
+  b.state.leafTarget={
+    x:clamp(Math.random()*g.w, R+20, g.w-R-20),
+    y:clamp(Math.random()*g.h, R+20, g.h-R-20)
+  };
+  b.bodyAlphaOverride=0.32;
+  spawnFloatText(g,b.x,b.y-30,'🍃 PHÂN TÁN!','#6fbf3f');
+  spawnParticles(g,b.x,b.y,16,{color:'#6fbf3f',type:'dust',speed:150,life:0.5});
+}
 const BALL_TYPES = [
 // ==================== 💥 NHÓM TẤN CÔNG (COMBAT) ====================
 {id:'blade', name:'Blade Ball', group:'dps', icon:'🗡️', hp:75, speed:100, dmg:10, color:'#c9c9d6',
- descSimple:'Lưỡi dao xoay quanh thân, tăng dần theo thời gian, gây sát thương khi địch áp sát.',
- desc:'Lưỡi dao quay quanh thân, phạm vi rộng. Bắt đầu với 1 dao, tăng dần tới tối đa 5 theo thời gian sống. Gây sát thương liên tục (mỗi 0.4s) khi địch lọt vào tầm quay.',
+ descSimple:'Xoay lưỡi dao quanh thân, số dao tăng dần theo thời gian sống, gây sát thương khi địch đến gần.',
+ desc:'Lưỡi dao quay quanh thân với phạm vi rộng. Bắt đầu trận với sẵn 1 lưỡi dao, số lượng tăng dần theo thời gian sống (tối đa 5), gây sát thương liên tục khi địch áp sát.',
  init:(b)=>{ b.state.blades=1; b.state.bladeTimer=0; },
  update:(b,dt,g)=>{
    b.state.bladeTimer+=dt;
@@ -40,8 +73,8 @@ const BALL_TYPES = [
    }
  }},
 {id:'machinegun', name:'Machine Gun Ball', group:'dps', icon:'🔫', hp:70, speed:145, dmg:4, color:'#5b7285',
- descSimple:'Xả đạn nhỏ liên tục về phía đối thủ, gây áp lực dồn dập.',
- desc:'Tự động bắn đạn nhỏ thẳng về phía đối thủ, mỗi 0.18 giây một viên. Gây sát thương liên tục, dồn ép không cho đối thủ kịp phản ứng.',
+ descSimple:'Tự động bắn liên tục đạn nhỏ về phía đối thủ, gây áp lực dồn dập không ngừng.',
+ desc:'Tự động xả liên tục các viên đạn nhỏ về phía quả bóng đối thủ, dồn ép không cho kịp phản ứng.',
  init:(b)=>{ b.state.fireCD=0; },
  update:(b,dt,g)=>{
    if(g.t-(b.state.fireCD||0)>0.18){
@@ -54,8 +87,8 @@ const BALL_TYPES = [
    }
  }},
 {id:'axe', name:'Axe Ball', group:'burst', icon:'🪓', hp:110, speed:75, dmg:14, color:'#8a5a2b',
- descSimple:'Vung rìu quanh thân; càng ít máu rìu càng quay nhanh và mạnh.',
- desc:'Vung rìu lớn xoay tròn quanh thân liên tục. Khi HP dưới 40%, tốc độ quay và sát thương của rìu tăng thêm 50%.',
+ descSimple:'Vung rìu lớn xoay quanh thân; càng ít máu, rìu quay càng nhanh và mạnh hơn.',
+ desc:'Vung rìu lớn xoay tròn quanh thân. Khi máu dưới 40%, tốc độ quay và sát thương tăng thêm 50%.',
  getMods:(b)=>{ const low=b.hp/b.maxHp<0.4; return low?{speedMult:1.5,dmgMult:1.5}:{speedMult:1,dmgMult:1}; },
  renderExtra:(b,g,ctx)=>{
    const low=b.hp/b.maxHp<0.4;
@@ -81,8 +114,8 @@ const BALL_TYPES = [
    ctx.restore();
  }},
 {id:'thief', name:'Thief Ball', group:'dps', icon:'🔪', hp:80, speed:120, dmg:8, color:'#4a4a52',
- descSimple:'Mất máu tích dao; tích lực rồi phóng toàn bộ dao vào đối thủ.',
- desc:'Cứ mất 15% HP thì tích thêm 1 con dao. Trước khi phóng có một nhịp tích lực ngắn (dao xoay nhanh dần quanh thân), sau đó phóng toàn bộ dao đã tích về phía đối thủ.',
+ descSimple:'Càng mất máu càng tích được nhiều dao; sau một nhịp tích lực ngắn sẽ phóng toàn bộ dao về phía đối thủ.',
+ desc:'Tích lũy dao: cứ mất 15% HP thì thêm 1 con dao. Trước khi phóng sẽ có một nhịp tích lực ngắn (dao xoay quanh thân, nhanh dần), sau đó phóng toàn bộ số dao đang tích lũy về phía đối thủ.',
  init:(b)=>{ b.state.throwCD=-99; b.state.knives=1; b.state.windingUp=false; b.state.windupStart=0; b.state.windupUntil=0; },
  update:(b,dt,g)=>{
    const missing=1-(b.hp/b.maxHp);
@@ -137,8 +170,8 @@ const BALL_TYPES = [
    ctx.restore();
  }},
 {id:'bow', name:'Bow Ball', group:'burst', icon:'🏹', hp:90, speed:100, dmg:9, color:'#7a5230',
- descSimple:'Bắn mũi tên năng lượng mạnh, nảy qua tường; thiên về đánh xa.',
- desc:'Tụ lực rồi bắn mũi tên năng lượng sát thương cao, tốc độ nhanh, nảy được qua tường để dồn thêm sát thương. Va chạm trực tiếp gây damage thấp hơn — mạnh nhất khi bắn xa.',
+ descSimple:'Định kỳ bắn ra mũi tên năng lượng mạnh, có thể nảy qua tường; thiên về đánh xa hơn cận chiến.',
+ desc:'Tụ lực rồi phóng mũi tên năng lượng lớn, sát thương cao, bắn nhanh hơn, nảy tường dồn sát thương. Sát thương khi va chạm trực tiếp với đối thủ giảm đi (chuyên bắn xa hơn cận chiến).',
  init:(b)=>{ b.state.lastFire=-99; b.state.drawing=false; b.state.drawStart=0; },
  update:(b,dt,g)=>{
    const CYCLE=1.5, DRAW=0.35;
@@ -194,8 +227,8 @@ const BALL_TYPES = [
    ctx.restore();
  }},
 {id:'charge', name:'Charge Ball', group:'burst', icon:'🔋', hp:95, speed:85, dmg:8, color:'#f0c419',
- descSimple:'Tích năng lượng khi rảnh; va chạm lúc đầy sẽ hất văng đối thủ mạnh.',
- desc:'Tích năng lượng khi không va chạm, đủ 2.5s thì va tiếp theo hất văng đối thủ mạnh. Nếu họ đập tường sau đó: 10 dmg cố định, nổ đất, choáng 0.3s. Va khi chưa tích đủ: không hiệu ứng, mất năng lượng.',
+ descSimple:'Tích năng lượng khi không va chạm; đủ 2.5s thì cú chạm tới hất văng đối thủ, đập tường sẽ choáng và mất thêm máu.',
+ desc:'Tích năng lượng khi không va chạm. Chỉ khi tích đủ 2.5 giây, va chạm tiếp theo mới giải phóng năng lượng khiến đối thủ lập tức bị đánh bật ra ngoài; nếu đối thủ va vào tường sau đó sẽ chịu 10 sát thương cố định, tạo hiệu ứng nổ đất và bị choáng 0.3 giây. Va chạm khi chưa tích đủ sẽ không có hiệu ứng gì và làm mất năng lượng đang tích.',
  init:(b)=>{ b.state.charge=0; },
  update:(b,dt,g)=>{ b.state.charge=Math.min(3,(b.state.charge||0)+dt); },
  onBallCollide:(b,other,g)=>{
@@ -222,8 +255,8 @@ const BALL_TYPES = [
    }
  }},
 {id:'burst', name:'Burst Ball', group:'burst', icon:'💥', hp:85, speed:120, dmg:10, color:'#ff7a3d',
- descSimple:'Định kỳ lướt đổi hướng; va chạm ngay sau đó gây sát thương gấp đôi.',
- desc:'Định kỳ kích hoạt một cú lướt ngắn đổi hướng. Va chạm đầu tiên ngay sau cú lướt gây sát thương gấp đôi bình thường.',
+ descSimple:'Định kỳ thực hiện một cú lướt nhanh đổi hướng; va chạm ngay sau cú lướt sẽ gây sát thương mạnh hơn hẳn.',
+ desc:'Định kỳ kích hoạt cú lướt ngắn đổi hướng, tăng gấp đôi sát thương ở lần va chạm đầu tiên sau khi lướt.',
  init:(b)=>{ b.state.dashCD=0; b.state.buffUntil=0; },
  update:(b,dt,g)=>{
    if(g.t-(b.state.dashCD||0)>4){
@@ -244,8 +277,8 @@ const BALL_TYPES = [
 
 // ==================== 🧪 NHÓM HIỆU ỨNG & KHỐNG CHẾ (CC) ====================
 {id:'poisonspike', name:'Poison Spike Ball', group:'control', icon:'☣️', hp:95, speed:100, dmg:5, color:'#5fa83d',
- descSimple:'Va tường để lại gai độc; chạm gai bị nhiễm độc và chậm lại.',
- desc:'Mỗi lần va tường để lại một chiếc gai độc nhỏ tại đó. Đối thủ chạm gai bị nhiễm độc trong 4 giây và giảm 20% tốc độ di chuyển.',
+ descSimple:'Để lại gai độc mỗi khi va tường; đối thủ chạm phải sẽ bị nhiễm độc và chậm lại.',
+ desc:'Va đập vào tường để lại một chiếc gai độc nhỏ. Kẻ địch chạm vào bị nhiễm độc 4 giây và giảm 20% tốc độ.',
  onWallHit:(b,g)=>{ spawnHazard(g,{type:'poisontrap',x:b.x,y:b.y,r:14,until:g.t+6,owner:b}); },
  renderExtra:(b,g,ctx)=>{
    const n=6;
@@ -264,8 +297,8 @@ const BALL_TYPES = [
    }
  }},
 {id:'electric', name:'Electric Ball', group:'control', icon:'⚡', hp:80, speed:120, dmg:9, color:'#f4e04d',
- descSimple:'Va chạm gây choáng kèm sát thương điện rải đều, có hồi chiêu.',
- desc:'Va chạm trực tiếp gây choáng 0.5 giây, kèm 5 sát thương điện mỗi 0.25 giây trong suốt thời gian choáng. Hồi chiêu 1 giây giữa hai lần kích hoạt.',
+ descSimple:'Va chạm trực tiếp gây choáng kèm sát thương điện rải đều trong lúc choáng, cần thời gian hồi giữa các lần kích hoạt.',
+ desc:'Va chạm trực tiếp phóng dòng điện gây choáng 0.5 giây, đồng thời gây thêm 5 sát thương nhiễm điện mỗi 0.25 giây trong suốt thời gian choáng. Hồi chiêu 1 giây giữa các lần kích hoạt.',
  init:(b)=>{ b.state.lastShock=-99; },
  onBallCollide:(b,other,g)=>{
    if(g.t-(b.state.lastShock||-99)<1) return;
@@ -284,8 +317,8 @@ const BALL_TYPES = [
    }
  }},
 {id:'frost', name:'Frost Ball', group:'control', icon:'🥶', hp:95, speed:100, dmg:7, color:'#8fd9e8',
- descSimple:'Để lại vệt sương giá; đứng trong bị chậm, mất máu, lâu sẽ đóng băng.',
- desc:'Để lại vệt sương giá dọc đường đi, tồn tại 3 giây. Chạm vào: giảm 50% tốc độ, mất 1 sát thương mỗi 0.5s. Đứng liên tục trong vệt đủ 1.5s sẽ bị đóng băng và chịu thêm sát thương.',
+ descSimple:'Để lại vệt sương giá dọc đường đi; đứng trong vệt bị chậm lại và mất máu dần, đứng đủ lâu sẽ bị đóng băng.',
+ desc:'Để lại vệt sương giá dọc theo đường đi, tồn tại 3 giây. Chạm vào giảm 50% tốc độ và chịu 1 sát thương mỗi 0.5 giây; đứng trong liên tục 1.5 giây sẽ bị đóng băng và chịu thêm sát thương liên tục.',
  init:(b)=>{ b.state.lastTrail=0; },
  update:(b,dt,g)=>{
    if(g.t-(b.state.lastTrail||0)>0.15){
@@ -294,15 +327,15 @@ const BALL_TYPES = [
    }
  }},
 {id:'icecone', name:'Powerless Ball', group:'control', icon:'🚫', hp:115, speed:70, dmg:13, color:'#7a4fae',
- descSimple:'Chạm đối thủ khiến họ mất kỹ năng đặc biệt tạm thời.',
- desc:'Khi chạm vào đối thủ, khiến họ mất toàn bộ năng lực đặc biệt (kỹ năng, hiệu ứng bị động) trong 2 giây, chỉ còn va chạm vật lý thuần túy. Bản thân gây sát thương va chạm nhỉnh hơn bình thường.',
+ descSimple:'Chạm vào đối thủ sẽ tạm thời tước hết kỹ năng đặc biệt của họ, chỉ còn va chạm vật lý thuần túy.',
+ desc:'Khi đụng vào đối thủ, khiến ball đó mất toàn bộ năng lực đặc biệt (kỹ năng, hiệu ứng bị động) trong 2 giây, chỉ còn va chạm vật lý thuần túy. Bản thân gây sát thương va chạm nhỉnh hơn bình thường một chút.',
  onBallCollide:(b,other,g)=>{
    other.state.powerlessUntil=g.t+2;
    spawnFloatText(g,other.x,other.y-30,'MẤT NĂNG LỰC!','#a8e8ff');
  }},
 {id:'thunder', name:'Thunder Ball', group:'burst', icon:'🌩️', hp:85, speed:120, dmg:13, color:'#e8c93a',
- descSimple:'Va tường đủ số lần sẽ phóng tia sét vào địch gần nhất.',
- desc:'Cứ 4 lần va tường liên tiếp sẽ phóng một tia sét thẳng vào đối thủ gần nhất, gây 10 sát thương cố định kèm hiệu ứng sét đánh.',
+ descSimple:'Sau một số lần va tường liên tiếp sẽ phóng một tia sét thẳng vào đối thủ gần nhất.',
+ desc:'Cứ 4 lần va vào tường sẽ phóng một tia sét thẳng vào kẻ địch gần nhất, kèm hiệu ứng sét đánh, gây sát thương cố định 10.',
  init:(b)=>{ b.state.wallHitCount=0; },
  onWallHit:(b,g)=>{
    b.state.wallHitCount=(b.state.wallHitCount||0)+1;
@@ -323,8 +356,8 @@ const BALL_TYPES = [
    }
  }},
 {id:'snake', name:'Snake Ball', group:'dps', icon:'🐍', hp:90, speed:110, dmg:10, color:'#7fbf3f',
- descSimple:'Đuôi năng lượng dài dần; quét trúng đối thủ gây sát thương, đẩy lùi.',
- desc:'Mọc đuôi năng lượng dài dần theo thời gian sống sót. Đuôi quét trúng đối thủ sẽ gây sát thương và đẩy lùi họ ra xa.',
+ descSimple:'Mọc đuôi năng lượng dài dần theo thời gian sống sót; đuôi quét trúng đối thủ sẽ gây sát thương và đẩy lùi.',
+ desc:'Mọc đuôi năng lượng dài dần theo thời gian sống sót, quét trúng đối thủ gây sát thương & đẩy lùi.',
  init:(b)=>{ b.state.tail=[]; b.state.tailTimer=0; },
  update:(b,dt,g)=>{
    b.state.tailTimer+=dt;
@@ -355,8 +388,8 @@ const BALL_TYPES = [
    ctx.strokeStyle='rgba(157,255,176,0.7)'; ctx.lineWidth=6; ctx.lineCap='round'; ctx.stroke();
  }},
 {id:'hook', name:'Hook Ball', group:'control', icon:'🪝', hp:90, speed:100, dmg:7, color:'#c8963c',
- descSimple:'Móc câu kéo đối thủ lại, choáng ngắn, tăng sát thương nhận sau đó.',
- desc:'Bắn ra một chiếc móc nối bằng dây. Đối thủ chạm móc hoặc dây bị kéo về phía Hook Ball và choáng ngắn, sau đó trong 2 giây nhận thêm x1.5 sát thương từ mọi nguồn.',
+ descSimple:'Bắn ra một chiếc móc câu; đối thủ dính móc hoặc dây sẽ bị kéo lại, choáng ngắn, và dễ tổn thương hơn trong ít giây sau đó.',
+ desc:'Bắn ra một chiếc móc nối bằng dây. Đối thủ chạm vào móc hoặc dây sẽ bị kéo về phía Hook Ball (đổi quỹ đạo) và bị choáng ngắn, sau đó trong 2 giây sẽ nhận thêm x1.5 sát thương từ mọi nguồn.',
  init:(b)=>{ b.state.hookCD=0; b.state.hook=null; },
  update:(b,dt,g)=>{
    const other=g.opponentOf(b);
@@ -401,8 +434,8 @@ const BALL_TYPES = [
    ctx.restore();
  }},
 {id:'florentino', name:'Florentino Ball', group:'control', icon:'🌹', hp:105, speed:110, dmg:9, color:'#e0568a',
- descSimple:'Lướt bất ngờ vào đối thủ, miễn nhiễm khống chế, rồi choáng và múa hoa gây sát thương liên hoàn.',
- desc:'Cứ 2s có 30% cơ hội lướt vào đối thủ trong tầm: miễn nhiễm khống chế, giảm 25% dmg nhận. Tới nơi: choáng, giữ đối thủ đứng yên, tung 3 bông hoa quanh họ. Nhặt trúng bông (50%) gây dmg lớn + hồi 6 HP, đủ 3 bông thì lặp lại; hụt 1 bông là mất hiệu ứng, thả đối thủ.',
+ descSimple:'Thỉnh thoảng lướt thẳng tới đối thủ, miễn khống chế và giảm sát thương lúc lướt. Chạm tới sẽ choáng và múa nhặt hoa, gây thêm sát thương và hồi máu.',
+ desc:'Nếu đối thủ nằm trong phạm vi lướt, cứ mỗi 2 giây có 30% cơ hội lướt thẳng tới đối thủ: ngay từ lúc bắt đầu lướt (chưa cần chạm tới) đã nhận miễn nhiễm mọi khống chế (làm chậm, choáng...) lẫn hiệu ứng đẩy lùi, cùng giảm 25% sát thương nhận vào từ mọi nguồn. Khi lướt tới nơi sẽ gây choáng cho đối thủ kèm một lượng sát thương nhỏ, đồng thời tung ra 3 bông hoa chia đều quanh đối thủ (bông đầu tiên luôn nằm ở phía đối diện giữa Florentino và đối thủ, hai bông còn lại cách đều 120°). Trong suốt thời gian múa (từ lúc lướt về tâm cho tới khi nhặt xong hoặc nhặt hụt), đối thủ bị giữ đứng yên hoàn toàn, không thể di chuyển, còn Florentino vẫn tiếp tục miễn nhiễm khống chế/đẩy lùi và giảm 25% sát thương nhận vào suốt cả quá trình. Florentino liên tục lướt về tâm đối thủ rồi lướt tiếp ra từng bông theo đúng thứ tự đó, xoay kiếm múa quanh mình như điệu múa nhặt hoa của Florentino trong AoV; mỗi lần nhặt trúng một bông (50% cơ hội, 50% nhặt hụt) gây thêm một lượng sát thương lớn hơn hẳn đòn choáng ban đầu, đồng thời tự hồi 6 HP cho bản thân. Nhặt đủ cả 3 bông sẽ lặp lại: choáng đối thủ thêm lần nữa và tung ra 3 bông mới quanh đối thủ, cứ thế tiếp diễn không giới hạn. Chỉ cần nhặt hụt một bông là mất ngay mọi miễn nhiễm, thả đối thủ ra và toàn bộ chuỗi múa kết thúc, quay lại chờ cơ hội kích hoạt tiếp theo.',
  init:(b)=>{
    b.state.floPhase='idle';
    b.state.floCD=0;
@@ -645,8 +678,8 @@ const BALL_TYPES = [
 
 // ==================== 🛡️ NHÓM HỖ TRỢ, VÙNG ĐẤT & TRIỆU HỒI ====================
 {id:'vampire', name:'Vampire Ball', group:'dps', icon:'🧛', hp:95, speed:120, dmg:9, color:'#8a1f3d',
- descSimple:'Định kỳ chạm đối thủ để hút máu hồi phục cho bản thân.',
- desc:'Cứ mỗi 4 giây, chạm vào đối thủ sẽ giữ họ lại và hút 10 HP để hồi phục cho bản thân. Luôn có 2 chiếc nanh chĩa về phía đối thủ.',
+ descSimple:'Định kỳ, khi chạm vào đối thủ sẽ hút máu của họ để hồi phục cho bản thân.',
+ desc:'Cứ mỗi 4 giây, khi chạm vào đối thủ sẽ giữ họ lại và hút 10 HP để hồi phục cho bản thân. Luôn có 2 chiếc nanh chĩa về phía đối thủ.',
  init:(b)=>{ b.state.lastVamp=-99; },
  onBallCollide:(b,other,g)=>{
    if(g.t-(b.state.lastVamp||-99)>4){
@@ -677,8 +710,8 @@ const BALL_TYPES = [
    ctx.restore();
  }},
 {id:'spider', name:'Spider Ball', group:'control', icon:'🕷️', hp:95, speed:100, dmg:6, color:'#4a3b5c',
- descSimple:'Va tường giăng tơ vĩnh viễn; đối thủ chạm tơ mất máu nhẹ.',
- desc:'Mỗi lần va tường giăng một sợi tơ nối tới bản thân, tồn tại vĩnh viễn — không giới hạn số lượng và không bao giờ biến mất. Đối thủ chạm vào tơ mất 1 HP.',
+ descSimple:'Mỗi lần va tường sẽ giăng một sợi tơ tồn tại vĩnh viễn; đối thủ chạm vào tơ sẽ mất máu nhẹ theo thời gian.',
+ desc:'Khi va tường, giăng một sợi tơ nối từ điểm chạm đến bản thân, tồn tại vĩnh viễn — số lượng dây không giới hạn và không bao giờ biến mất. Đối thủ chạm vào sợi tơ sẽ mất 1 máu.',
  init:(b)=>{ b.state.webAnchors=[]; },
  onWallHit:(b,g)=>{
    b.state.webAnchors.push({x:b.x,y:b.y,lastHit:-99});
@@ -716,8 +749,8 @@ const BALL_TYPES = [
    }
  }},
 {id:'reforge', name:'Reforge Ball', group:'dps', icon:'⚒️', hp:100, speed:100, dmg:8, color:'#b5652f',
- descSimple:'Va tường triệu hồi linh hồn hỗ trợ, mạnh dần khi đánh trúng địch.',
- desc:'Va tường triệu hồi một tiểu linh hồn tự bắn đạn hỗ trợ, mạnh dần mỗi khi đánh trúng địch. Khi HP dưới 50%, triệu hồi thêm linh hồn thứ hai.',
+ descSimple:'Va tường sẽ triệu hồi một linh hồn nhỏ tự bắn đạn hỗ trợ; linh hồn mạnh dần khi đánh trúng địch, và có thêm một linh hồn nữa khi máu xuống thấp.',
+ desc:'Đập vào tường để triệu hồi tiểu linh hồn bắn đạn hỗ trợ, tích lũy sức mạnh nhanh mỗi khi đánh trúng địch. Khi HP dưới 50%, triệu hồi thêm linh hồn thứ hai.',
  init:(b)=>{ b.state.minions=[]; },
  onWallHit:(b,g)=>{
    if(b.state.minions.length<1) b.state.minions.push({x:b.x,y:b.y,power:1,fireCD:0,offset:-30});
@@ -770,8 +803,8 @@ const BALL_TYPES = [
    }
  }},
 {id:'cell', name:'Cell Ball', group:'dps', icon:'🦠', hp:80, speed:110, dmg:5, color:'#7ee06a',
- descSimple:'Mất máu tới mốc sẽ nhân đôi bản thể; sát thương tăng theo mỗi lần chia.',
- desc:'Khi HP chạm mốc 75%/50%/25%/thấp nhất: nhân đôi toàn bộ số bản thể hiện có (kể cả bản thân) thành bản sao độc lập, bay ngẫu nhiên, va chạm như bóng thường. Mỗi lần phân chia sát thương tăng thêm x1.5.',
+ descSimple:'Mất tới mốc máu nhất định sẽ nhân đôi toàn bộ bản thể thành các bản sao độc lập, sát thương tăng theo mỗi lần phân chia.',
+ desc:'Cứ khi máu chạm mốc còn 75%/50%/25%/mốc cuối, Cell Ball nhân đôi toàn bộ số lượng bản thể đang có (kể cả bản thân) thành các bản sao độc lập kích thước bằng chính nó — đang có 2 sẽ ra 4, đang có 4 sẽ ra 8. Các bản sao bay theo hướng ngẫu nhiên, va chạm như bóng thường. Sát thương của Cell Ball tăng thêm x1.5 mỗi lần phân chia.',
  init:(b)=>{ b.state.thresholdsHit=0; b.state.dmgMult=1; },
  update:(b,dt,g)=>{
    const missingRatio=1-(b.hp/b.maxHp);
@@ -809,8 +842,8 @@ const BALL_TYPES = [
    }
  }},
 {id:'range', name:'Range Ball', group:'dps', icon:'🌐', hp:110, speed:70, dmg:6, color:'#4fb0c9',
- descSimple:'Tạo vòng năng lượng mở rộng dần quanh mình; đứng trong bị bào máu.',
- desc:'Tạo vòng năng lượng bao quanh bản thân, mở rộng dần theo thời gian nhưng tối đa chỉ phủ khoảng 65% sân đấu. Ai đứng bên trong vòng sẽ bị bào mòn máu liên tục.',
+ descSimple:'Tạo một vòng năng lượng quanh bản thân, mở rộng dần theo thời gian (có giới hạn); ai đứng bên trong sẽ bị bào mòn máu.',
+ desc:'Tạo vòng năng lượng bao quanh bản thân, mở rộng dần theo thời gian nhưng bị giới hạn tối đa chỉ bao phủ khoảng 65% sân đấu, bào mòn máu ai đứng bên trong.',
  init:(b)=>{ b.state.auraTimer=0; },
  update:(b,dt,g)=>{
    b.state.auraTimer+=dt;
@@ -831,8 +864,8 @@ const BALL_TYPES = [
    ctx.strokeStyle='rgba(255,203,61,0.45)'; ctx.lineWidth=2; ctx.stroke();
  }},
 {id:'zone', name:'Zone Ball', group:'control', icon:'🟥', hp:120, speed:55, dmg:6, color:'#c0392b',
- descSimple:'Rải ô vuông tử địa trên sân, càng mất máu càng nhiều ô; lọt vào rất đau.',
- desc:'Vào trận có sẵn 1 ô vuông tử địa. Cứ mất thêm 20% HP thì tạo thêm 1 ô tại vị trí ngẫu nhiên trên sân. Lọt vào ô chịu sát thương cực nặng.',
+ descSimple:'Tạo ra các ô vuông tử địa rải rác trên sân đấu — càng mất nhiều máu càng có thêm ô mới; lọt vào ô sẽ chịu sát thương rất nặng.',
+ desc:'Ngay khi vào trận đã tự tạo sẵn 1 ô vuông tử địa. Sau đó, cứ mỗi 20% HP bị mất, tạo thêm 1 ô vuông tử địa tại vị trí ngẫu nhiên trên sân đấu, gây sát thương cực nặng cho ai lọt vào trong.',
  init:(b)=>{ b.state.thresholdsHit=0; b.state.startZoneDone=false; },
  update:(b,dt,g)=>{
    if(!b.state.startZoneDone){
@@ -853,8 +886,8 @@ const BALL_TYPES = [
    }
  }},
 {id:'laser', name:'Laser Ball', group:'burst', icon:'🔴', hp:70, speed:120, dmg:11, color:'#ff4d4d',
- descSimple:'Dựng 4 laser cố định quanh sân từ đầu trận; chạm vào mất máu liên tục.',
- desc:'Vào trận dựng ngay 4 đường laser cố định dọc theo 4 cạnh sân đấu, tồn tại tới hết trận. Chạm vào laser chịu sát thương liên tục.',
+ descSimple:'Ngay khi vào trận sẽ dựng 4 đường laser cố định dọc theo các cạnh sân đấu, tồn tại tới hết trận; chạm vào sẽ liên tục mất máu.',
+ desc:'Ngay khi vào trận, dựng 4 đường laser cố định dọc theo 4 cạnh sân đấu, tồn tại vĩnh viễn tới hết trận. Chạm vào sẽ chịu sát thương liên tục.',
  init:(b)=>{ b.state.lasersSpawned=false; },
  update:(b,dt,g)=>{
    if(!b.state.lasersSpawned){
@@ -869,8 +902,8 @@ const BALL_TYPES = [
 
 // ==================== 🎁 NHÓM ĐẶC BIỆT & ĐỘC QUYỀN ====================
 {id:'bomb', name:'Bomb Ball', group:'burst', icon:'💣', hp:100, speed:100, dmg:14, color:'#4a4a4a',
- descSimple:'Định kỳ thả bom hẹn giờ; nổ diện rộng sau vài giây.',
- desc:'Mỗi giây thả một quả bom hẹn giờ (có đếm ngược). Sau 5 giây bom phát nổ, gây sát thương diện rộng quanh điểm nổ kèm vòng nổ lan tỏa.',
+ descSimple:'Định kỳ thả một quả bom hẹn giờ; sau vài giây bom phát nổ, gây sát thương diện rộng quanh vị trí nổ.',
+ desc:'Cứ mỗi 1 giây thả một quả bom hẹn giờ (có hiện đếm ngược). Sau 5 giây, bom phát nổ gây sát thương diện rộng quanh vị trí quả bom, kèm hiệu ứng vòng nổ lan tỏa (phạm vi lớn hơn, nhưng vẫn không phải toàn map).',
  init:(b)=>{ b.state.bombCD=0; },
  update:(b,dt,g)=>{
    if(g.t-(b.state.bombCD||0)>1){
@@ -894,8 +927,8 @@ const BALL_TYPES = [
    ctx.fillStyle='#ffcf4a'; ctx.fill();
  }},
 {id:'conductor', name:'Train Ball', group:'burst', icon:'🚂', hp:95, speed:100, dmg:13, color:'#c97a2f',
- descSimple:'Va tường tạo đường ray; tàu chạy qua gây sát thương nặng, hất văng.',
- desc:'Va tường đánh dấu điểm ray, nối với điểm chạm trước đó. Mỗi 5 giây một đoàn tàu chạy dọc theo đường ray, gây 22 sát thương cố định và hất văng ai cản đường. Chạy xong ray biến mất, phải tạo lại từ đầu.',
+ descSimple:'Va tường đánh dấu điểm ray; sau ít giây một đoàn tàu chạy dọc ray đó, gây sát thương nặng và hất văng ai cản đường.',
+ desc:'Va tường để lại điểm ray nối với điểm chạm trước đó. Sau mỗi 5 giây, một đoàn tàu (hitbox lớn) chạy đúng theo đường ray đã tạo, gây sát thương cố định 22 và húc văng/hất tung bất kỳ ai cản đường. Chạy xong, đường ray đó biến mất và phải tạo lại từ đầu.',
  init:(b)=>{ b.state.trainCD=0; b.state.railPoints=[]; b.state.activeRail=null; },
  onWallHit:(b,g)=>{
    b.state.railPoints.push({x:b.x,y:b.y});
@@ -924,19 +957,41 @@ const BALL_TYPES = [
    ctx.stroke(); ctx.setLineDash([]);
  }},
 {id:'potion', name:'Potion Ball', group:'special', icon:'🧪', hp:90, speed:100, dmg:9, color:'#3ecf9e',
- descSimple:'Va chạm kích hoạt hiệu ứng ngẫu nhiên: đốt, choáng, hồi máu hoặc tăng tốc.',
- desc:'Va chạm ném ra một hiệu ứng ngẫu nhiên: đốt cháy đối thủ, gây choáng, tự hồi máu, hoặc tự tăng tốc độ.',
+ descSimple:'Va chạm tích năng lượng; đủ vạch sẽ ném bình thuốc ngẫu nhiên: đốt, độc, đóng băng, giật điện hoặc tự hồi máu.',
+ desc:'Mang thanh năng lượng 4 vạch. Mỗi lần va chạm: 75% cơ hội tích thêm 1 vạch, 25% cơ hội ném các bình thuốc ngẫu nhiên ngay theo số vạch đang có rồi thanh năng lượng tụt về 0 (0 vạch ném 1 loại, 4 vạch ném đủ cả 5 loại). Nếu thanh đã đầy 4 vạch, lần va chạm tiếp theo TỰ ĐỘNG ném cả 5 loại thuốc luôn, không cần roll may rủi nữa. Không có chữ báo hiệu ứng - chỉ có icon nhỏ hiện trên đầu quả bóng bị dính, các icon có thể chồng lên nhau nếu trúng nhiều loại cùng lúc. Burn 🔥: 3 dmg/0.3s lên đối thủ, đồng thời giảm 50% sát thương đối thủ gây ra trong lúc đang cháy. Toxic ☠️: 3 dmg/0.3s lên đối thủ, độc tăng thêm 3 dmg mỗi nhịp (hết hiệu ứng độc trở lại mức 3). Frozen ❄️ / Shock ⚡: khiến đối thủ đứng yên tại chỗ, gây 1 dmg/0.2s. Health 💚: tự hồi 7 máu/0.3s cho chính Potion Ball. Mỗi hiệu ứng kéo dài 1 giây.',
+ init:(b)=>{ b.state.potionEnergy=0; },
  onBallCollide:(b,other,g)=>{
-   const roll=randi(0,3);
-   if(roll===0){ other.state.poisonUntil=g.t+3; other.state.poisonTickDmg=3; spawnFloatText(g,other.x,other.y-30,'BURN!','#ff8a3d'); }
-   else if(roll===1){ other.state.stunUntil=g.t+0.4; spawnFloatText(g,other.x,other.y-30,'STUN!','#fff36a'); }
-   else if(roll===2){ b.hp=Math.min(b.maxHp,b.hp+14); spawnFloatText(g,b.x,b.y-30,'+14','#7CFF9A'); }
-   else { b.state.speedBoostUntil=g.t+2; spawnFloatText(g,b.x,b.y-30,'SPEED!','#8fdcff'); }
+   if((b.state.potionEnergy||0)>=4){
+     // Full bar (4 vạch): auto-throw all 5 potions on this hit, no roll needed
+     throwPotions(b,other,g,5);
+     return;
+   }
+   if(Math.random()<0.75){
+     b.state.potionEnergy=Math.min(4,(b.state.potionEnergy||0)+1);
+     spawnParticles(g,b.x,b.y,6,{color:'#3ecf9e',type:'spark',speed:90});
+   } else {
+     const countByEnergy={0:1,1:2,2:3,3:4,4:5};
+     const count=countByEnergy[b.state.potionEnergy||0];
+     throwPotions(b,other,g,count);
+   }
  },
- getMods:(b,g)=>({speedMult:(g.t<(b.state.speedBoostUntil||0))?1.4:1})},
+ renderExtra:(b,g,ctx)=>{
+   // energy bar: 4 pips above the ball (drawn above the generic status icons)
+   const n=4, w=8, h=6, gap=3;
+   const totalW=n*w+(n-1)*gap;
+   const startX=b.x-totalW/2, y=b.y-b.radius-30;
+   for(let i=0;i<n;i++){
+     const filled=i<(b.state.potionEnergy||0);
+     ctx.beginPath();
+     ctx.rect(startX+i*(w+gap),y,w,h);
+     ctx.fillStyle= filled? '#3ecf9e' : 'rgba(0,0,0,0.12)';
+     ctx.fill();
+     ctx.lineWidth=1; ctx.strokeStyle='#1a1a1a'; ctx.stroke();
+   }
+ }},
 {id:'dice', name:'Dice Ball', group:'burst', icon:'🎲', hp:90, speed:100, dmg:8, color:'#e8e8e8',
- descSimple:'Va chạm đổi mặt xúc xắc; mặt càng lớn sát thương càng cao.',
- desc:'Sau mỗi lần va chạm, tự đổi mặt xúc xắc (1-6). Mặt càng lớn thì sát thương gây ra ở lần va tiếp theo càng cao.',
+ descSimple:'Mỗi lần va chạm sẽ tự đổi mặt xúc xắc; mặt xúc xắc càng lớn thì sát thương gây ra càng cao.',
+ desc:'Sau mỗi lần va chạm, tự đổi mặt xúc xắc, sát thương tăng dần đều theo mặt xúc xắc: ra 1 yếu nhất, ra 6 mạnh nhất (không còn chênh lệch cực đoan như trước).',
  modifyOutgoing:(b,other,dmg,g)=>{
    const roll=randi(1,6);
    spawnFloatText(g,b.x,b.y-46,'🎲'+roll,'#ffffff');
@@ -944,8 +999,8 @@ const BALL_TYPES = [
    return dmg*table[roll];
  }},
 {id:'bigspike', name:'Big Spike Ball', group:'burst', icon:'🔩', hp:180, speed:65, dmg:15, color:'#5a5a5a', radiusMult:1.25, massMult:2.2,
- descSimple:'Không có kỹ năng; thân to nặng, lực húc trực diện cực mạnh.',
- desc:'Gắn gai sắt khổng lồ quanh thân. Không có kỹ năng đặc biệt, nhưng lực húc trực diện cực kỳ mạnh, dễ phá vỡ phòng thủ đối thủ.',
+ descSimple:'Không có kỹ năng đặc biệt, nhưng thân hình to và nặng khiến lực húc trực diện cực kỳ mạnh, dễ phá vỡ phòng thủ đối thủ.',
+ desc:'Gắn gai sắt khổng lồ xung quanh. Không có kỹ năng phức tạp, nhưng lực húc trực diện cực kỳ mạnh, dễ phá vỡ phòng thủ.',
  renderExtra:(b,g,ctx)=>{
    const n=8;
    for(let i=0;i<n;i++){
@@ -966,29 +1021,81 @@ const BALL_TYPES = [
  descSimple:'Không có kỹ năng đặc biệt, mọi chỉ số đều ở mức trung bình, bù lại độ ổn định cao và dễ điều khiển.',
  desc:'Không có kỹ năng đặc biệt, mọi chỉ số đều ở mức trung bình, bù lại độ ổn định cao và dễ điều khiển.'},
 {id:'forcefield', name:'Forcefield Ball', group:'special', icon:'🛡️', hp:95, speed:115, dmg:6, color:'#4fa8e8',
- descSimple:'Định kỳ tạo khiên: giảm sát thương nhận, phản lại một phần cho đối thủ.',
- desc:'Định kỳ tạo lớp khiên bảo vệ trong 2 giây: bản thân chỉ nhận 50% sát thương, đồng thời phản ngược lại 150% sát thương gốc cho đối thủ.',
- init:(b)=>{ b.state.shieldCD=0; },
- update:(b,dt,g)=>{ if(g.t-(b.state.shieldCD||0)>6){ b.state.shieldCD=g.t; b.state.shieldUntil=g.t+2; } },
+ descSimple:'Luôn mang khiên năng lượng; đỡ đòn giảm sát thương nhận và phản lại cho đối thủ, sau đó vỡ và cần thời gian hồi phục.',
+ desc:'Mang khiên năng lượng thường trực, không giới hạn thời gian - khiên chỉ mất đi khi thực sự đỡ một đòn: lần trúng đòn đó bản thân chỉ nhận 50% sát thương, đồng thời phản ngược lại 150% sát thương gốc cho đối thủ. Ngay sau đó khiên vỡ và mất 4 giây để tái tạo trước khi bảo vệ trở lại.',
+ init:(b)=>{ b.state.shieldReady=true; b.state.shieldBrokenAt=-99; b.state.shieldCooldown=4; },
+ update:(b,dt,g)=>{
+   // Shield has no timer while up - it only ever breaks by actually
+   // absorbing/reflecting a hit (see modifyIncoming). This just handles the
+   // recharge countdown after it broke.
+   if(!b.state.shieldReady && g.t-(b.state.shieldBrokenAt||-99) >= b.state.shieldCooldown){
+     b.state.shieldReady=true;
+     spawnFloatText(g,b.x,b.y-42,'KHIÊN HỒI PHỤC!','#8fdcff');
+     spawnParticles(g,b.x,b.y,10,{color:'#8fdcff',type:'glow',speed:60,life:0.5});
+   }
+ },
  modifyIncoming:(b,attacker,dmg,g)=>{
-   if(g.t<(b.state.shieldUntil||0)){
+   if(b.state.shieldReady && dmg>0){
      const reflect=dmg*1.5;
      attacker.hp=Math.max(0,attacker.hp-reflect);
      spawnFloatText(g,attacker.x,attacker.y-30,'-'+reflect.toFixed(0),'#8fdcff');
      spawnFloatText(g,b.x,b.y-46,'REFLECT!','#8fdcff');
+     // shield breaks on the hit it just absorbed - starts its recharge clock
+     b.state.shieldReady=false;
+     b.state.shieldBrokenAt=g.t;
+     g.spawnExplosionRing(b.x,b.y,b.radius+24,'79,168,232','200,236,255');
+     spawnParticles(g,b.x,b.y,16,{color:'#8fdcff',type:'spark',speed:230});
      return dmg*0.5;
    }
    return dmg;
  },
  renderExtra:(b,g,ctx)=>{
-   if(g.t<(b.state.shieldUntil||0)){
-     ctx.beginPath(); ctx.arc(b.x,b.y,b.radius+10,0,Math.PI*2);
+   const R=b.radius+13;
+   if(b.state.shieldReady){
+     // ---- active shield: rotating hex energy field, hi-tech but minimal ----
+     const rot=g.t*0.6;
+     const pulse=0.75+0.25*Math.sin(g.t*3);
+     ctx.save();
+     ctx.shadowColor='#4fa8e8'; ctx.shadowBlur=13*pulse;
+     // hex barrier outline + faint fill
+     ctx.beginPath();
+     for(let i=0;i<6;i++){
+       const ang=rot+i*Math.PI/3;
+       const px=b.x+Math.cos(ang)*R, py=b.y+Math.sin(ang)*R;
+       i===0?ctx.moveTo(px,py):ctx.lineTo(px,py);
+     }
+     ctx.closePath();
+     ctx.fillStyle=`rgba(79,168,232,${0.07+0.05*pulse})`; ctx.fill();
+     ctx.strokeStyle=`rgba(143,220,255,${0.7*pulse})`; ctx.lineWidth=2.5; ctx.stroke();
+     // small glowing node at each hex vertex - reads as "energy field", not clutter
+     for(let i=0;i<6;i++){
+       const ang=rot+i*Math.PI/3;
+       const px=b.x+Math.cos(ang)*R, py=b.y+Math.sin(ang)*R;
+       ctx.beginPath(); ctx.arc(px,py,2.3,0,Math.PI*2);
+       ctx.fillStyle='#eaf7ff'; ctx.fill();
+     }
+     ctx.shadowBlur=0;
+     // single bright scan arc sweeping around the barrier - the one "tech" flourish
+     const sweep=g.t*2.4;
+     ctx.beginPath();
+     ctx.arc(b.x,b.y,R,sweep,sweep+0.85);
+     ctx.strokeStyle=`rgba(255,255,255,${0.55+0.3*pulse})`; ctx.lineWidth=2; ctx.stroke();
+     ctx.restore();
+   } else {
+     // ---- shield down: faint dashed outline + clean radial recharge sweep ----
+     const rechargeT=clamp((g.t-(b.state.shieldBrokenAt||-99))/b.state.shieldCooldown,0,1);
+     ctx.save();
+     ctx.beginPath(); ctx.arc(b.x,b.y,R,0,Math.PI*2);
+     ctx.strokeStyle='rgba(143,220,255,0.16)'; ctx.lineWidth=2; ctx.setLineDash([3,5]); ctx.stroke(); ctx.setLineDash([]);
+     ctx.beginPath();
+     ctx.arc(b.x,b.y,R,-Math.PI/2,-Math.PI/2+rechargeT*Math.PI*2);
      ctx.strokeStyle='rgba(143,220,255,0.85)'; ctx.lineWidth=3; ctx.stroke();
+     ctx.restore();
    }
  }},
 {id:'ghost', name:'Ghost Ball', group:'special', icon:'👻', hp:90, speed:105, dmg:8, color:'#9a8fc9',
- descSimple:'Thỉnh thoảng dịch chuyển bất ngờ tới cạnh đối thủ để đánh úp.',
- desc:'22% cơ hội mỗi lần va tường sẽ biến mất rồi xuất hiện bất ngờ cạnh đối thủ (blink). Sau blink: sát thương +50% trong ít giây, đòn trúng kế tiếp giảm 50% dmg (dùng 1 lần, nạp lại ở blink sau).',
+ descSimple:'Di chuyển khó đoán, đôi lúc dịch chuyển tới cạnh đối thủ để đánh úp; sau đó sát thương gây ra tăng tạm thời, đòn kế tiếp nhận vào giảm một nửa.',
+ desc:'Quỹ đạo chuyển động khó đoán, thỉnh thoảng biến mất trong tích tắc rồi xuất hiện bất ngờ cạnh đối thủ để đánh úp (22% cơ hội mỗi lần va tường). Sau mỗi lần blink, sát thương tăng thêm 50% trong ít giây, đồng thời lần trúng đòn kế tiếp (dù từ nguồn nào) sẽ được giảm 50% sát thương (hiệu ứng chỉ dùng được 1 lần, tái nạp lại ở lần blink sau).',
  update:(b,dt,g)=>{ if(Math.random()<0.01){ b.vx+=rand(-80,80); b.vy+=rand(-80,80); clampBallSpeed(b); lockSpeed(b, Math.hypot(b.vx,b.vy)); } },
  onWallHit:(b,g)=>{
    if(Math.random()<0.22){
@@ -1018,8 +1125,8 @@ const BALL_TYPES = [
    return dmg;
  }},
 {id:'shooting', name:'Shooting Ball', group:'special', icon:'🎯', hp:75, speed:160, dmg:9, color:'#f2a83c',
- descSimple:'Va tường liên tiếp không trúng địch sẽ tích sát thương, xả hết khi chạm được.',
- desc:'Mỗi lần va tường mà chưa chạm đối thủ kể từ lần trước: tốc độ x1.5, sát thương x1.25 (tối đa x3). Chạm được đối thủ sẽ xả hết sát thương tích lũy rồi tích lại từ đầu.',
+ descSimple:'Va tường liên tiếp mà chưa chạm địch sẽ tăng dần tốc độ và sát thương; chạm được đối thủ thì xả hết rồi tích lại từ đầu.',
+ desc:'Mỗi lần va tường mà chưa chạm đối thủ kể từ lần va trước, tốc độ nhân thêm x1.5 và sát thương nhân thêm x1.25 (sát thương tối đa x3). Chạm được đối thủ sẽ xả toàn bộ sát thương tích lũy rồi tích lại từ đầu.',
  init:(b)=>{ b.state.dmgMult=1; b.state.touchedOpponent=false; },
  onWallHit:(b,g)=>{
    if(!b.state.touchedOpponent){
@@ -1041,15 +1148,15 @@ const BALL_TYPES = [
    drawFireAura(ctx,b,g,heat);
  }},
 {id:'tornado', name:'Tornado Ball', group:'control', icon:'🌪️', hp:90, speed:100, dmg:8, color:'#8a4fd9',
- descSimple:'Thỉnh thoảng tạo lốc xoáy hút và cuốn đối thủ, nổ tung sau ít giây.',
- desc:'Mỗi 6-10s có cơ hội bẻ quỹ đạo thành vòng tròn, tạo lốc xoáy đứng yên tại tâm 2s. Lốc hút nhẹ + gây 1 dmg/0.2s; hút đủ 1s sẽ cuốn đối thủ quay vòng. Hết 2s lốc nổ: 18 sát thương, hất văng người gần tâm.',
+ descSimple:'Đôi lúc bẻ quỹ đạo thành vòng tròn, tạo lốc xoáy hút nhẹ đối thủ lại gần, cuốn họ quay nếu dính đủ lâu rồi nổ tung sau 2 giây.',
+ desc:'Cứ khoảng 5-9 giây, có cơ hội đột ngột bẻ quỹ đạo của chính mình thành một vòng tròn (không dịch chuyển tức thời, chỉ đổi hướng đi mượt sang hình tròn), tạo ra một cơn lốc xoáy đứng yên tại đúng tâm vòng tròn đó, tồn tại 2 giây. Trong lúc lốc còn tồn tại: nếu đối thủ ở trong phạm vi hút, lốc sẽ hút nhẹ (chỉ bẻ dần hướng đi, không giật hẳn về) đồng thời gây 1 sát thương mỗi 0.2 giây; nếu đối thủ ở trong phạm vi hút liên tục đủ 1 giây, họ sẽ bị cuốn hẳn vào trong và buộc phải quay vòng quanh tâm lốc cho tới khi lốc tan biến. Đúng 2 giây kể từ lúc xuất hiện, cơn lốc nổ tung, gây 18 sát thương và hất văng bất kỳ ai ở gần tâm.',
  init:(b)=>{ b.state.torPhase='idle'; b.state.torCD=-99; b.state.torTimer=0; },
  update:(b,dt,g)=>{
    if(b.state.torPhase==='idle'){
      // "thỉnh thoảng" - occasional random trigger, gated by both a hard
      // cooldown (torCD) and a per-second chance, so it can't spam back to
      // back; also skipped near walls/obstacles so the orbit never clips them.
-     if(g.t-(b.state.torCD||-99)>6 && !g.isNearHazard(b) && g.opponentOf(b) && Math.random()<0.25*dt){
+     if(g.t-(b.state.torCD||-99)>5 && !g.isNearHazard(b) && g.opponentOf(b) && Math.random()<0.25*dt){
        const speed=Math.hypot(b.vx,b.vy)||b.speedLock||100;
        const travelAngle=Math.atan2(b.vy,b.vx);
        const side=Math.random()<0.5?1:-1;
@@ -1100,8 +1207,8 @@ const BALL_TYPES = [
 
 // ==================== 🌀 NHÓM ĐẶC BIỆT (SPECIAL) ====================
 {id:'beyblade', name:'Beyblade Ball', group:'special', icon:'🌀', hp:100, speed:130, dmg:10, color:'#2fd4ff',
- descSimple:'Không có thanh máu — sống chết theo Động Lượng; đâm trúng địch gây sát thương theo % máu tối đa.',
- desc:'Sống chết theo Động Lượng (100%→0%), không dùng thanh máu. Bị đánh/va tường: -1% ĐL. Đâm trúng địch: gây 10% HP tối đa của họ, tự mất 5% ĐL. Mỗi 5s có 50% cơ hội lao vào đối thủ, hồi 15% ĐL nếu trúng. Hết ĐL là vỡ ngay.',
+ descSimple:'Sống chết theo Động Lượng thay vì máu. Đâm trúng gây sát thương lớn nhưng tốn ĐL; định kỳ có cơ hội bùng nổ lao vào đối thủ để hồi lại ĐL.',
+ desc:'Cơ chế đặc biệt: không dùng thanh máu, chỉ số quyết định sống còn là Động Lượng (100% -> 0%). Mỗi lần nhận sát thương từ bất kỳ nguồn nào hoặc va vào tường chỉ mất 1% ĐL (hiện dòng chữ -1%, không mất máu thật). Khi đâm trúng đối thủ, luôn gây đúng 10% máu tối đa đối thủ rồi tự mất 5% ĐL. Cứ 5 giây có 50% cơ hội tự bẻ hướng lao thẳng vào đối thủ (giữ nguyên tốc độ), bốc lửa xanh trong 1.4 giây và hồi lại 15% ĐL (không vượt quá 100%) nếu trúng. Hết Động Lượng thì vỡ ngay lập tức.',
  momentumBar:true,
  init:(b)=>{ b.state.momentum=100; b.state.burstCD=0; b.state.burstFireUntil=0; },
  update:(b,dt,g)=>{
@@ -1218,11 +1325,15 @@ const BALL_TYPES = [
 
 // ---- Werewolf Ball: human by day, wolf by night ----
 {id:'werewolf', name:'Werewolf Ball', group:'special', icon:'🐺', hp:30, speed:95, dmg:0, color:'#e8b48c',
- descSimple:'Người máu yếu, định kỳ hoá sói mạnh mẽ trong ít giây rồi trở lại.',
- desc:'Dạng người: HP nền 30, không gây sát thương. Mỗi 12s hoá Sói: HP tối đa +400%, tốc độ +50%, hồi 4 HP/s, tự lao vào đối thủ, vùng cào quanh thân gây 10 dmg/0.2s. Sau 12s hoá lại người, đầy máu. Mỗi lần đổi dạng miễn 1 đòn kế tiếp.',
+ descSimple:'Vào trận yếu ớt ở dạng người. Định kỳ hoá sói: máu và tốc độ tăng vọt, tự lao vào đối thủ và cào sát thương liên tục, rồi hoá lại người với máu đầy.',
+ desc:'Bắt đầu trận ở dạng người: HP nền rất thấp (30), không gây sát thương khi va chạm. Cứ sau 12 giây, môi trường tối lại như ban đêm với một vầng trăng tròn hiện giữa map và ball hoá thành Werewolf: máu tối đa tăng 400% (gấp 5 so với mốc người), tốc độ +50%, tự hồi đầy máu rồi hồi thêm 4 HP mỗi giây, cứ mỗi giây tự đổi hướng lao thẳng về phía đối thủ, và có một vùng cào (vòng nguy hiểm) quanh thân — hễ đối thủ lọt vào vùng này sẽ liên tục lãnh 10 sát thương mỗi 0.2 giây kèm hiệu ứng cào/chém đầy đủ. Sau 12 giây ở dạng sói, trời sáng trở lại, ball hoá về người với máu đầy theo đúng mốc máu tối đa gốc, không bị trừ. Ngoài ra, ngay khi vào trận và ngay sau MỖI lần đổi dạng (người→sói hoặc sói→người), ball được khiên miễn nhiễm hoàn toàn đòn đánh kế tiếp (dùng 1 lần rồi mất, nạp lại ở lần đổi dạng sau). Mốc 12 giây chạy theo thời gian trận đấu: chỉ bắt đầu đếm khi giao tranh thực sự bắt đầu (không tính lúc hai bên đang ngắm) và đứng yên hoàn toàn khi Clock Ball ngưng đọng thời gian.',
  init:(b)=>{
    b.state.form='human';
-   b.state.formSince=0;
+   // NOT 0: game time already runs during the aiming phases, so anchoring the
+   // 12s human timer to t=0 made the first transformation arrive early (by
+   // however long both players spent aiming). It is anchored to the first
+   // simulated frame instead (see update()).
+   b.state.formSince=null;
    b.state.baseMaxHp=b.maxHp;
    b.state.homingAt=0;
    b.state.clawCD=0;
@@ -1245,8 +1356,9 @@ const BALL_TYPES = [
    return dmg;
  },
  update:(b,dt,g)=>{
-   const elapsed=g.t-(b.state.formSince||0);
-   if(b.state.form==='human' && elapsed>=12){
+   if(b.state.formSince==null) b.state.formSince=g.t;
+   const elapsed=g.t-b.state.formSince;
+   if(b.state.form==='human' && elapsed>=WEREWOLF_FORM_SECONDS){
      b.state.form='wolf';
      b.state.formSince=g.t;
      b.state.nightMode=true;
@@ -1257,7 +1369,7 @@ const BALL_TYPES = [
      spawnParticles(g,b.x,b.y,30,{color:'#8b5cf6',type:'glow',speed:210,life:0.9});
      spawnParticles(g,b.x,b.y,16,{color:'#ffcf5c',type:'spark',speed:260,life:0.5});
      g.triggerShake(6,0.22);
-   } else if(b.state.form==='wolf' && elapsed>=12){
+   } else if(b.state.form==='wolf' && elapsed>=WEREWOLF_FORM_SECONDS){
      b.state.form='human';
      b.state.formSince=g.t;
      b.state.nightMode=false;
@@ -1280,7 +1392,7 @@ const BALL_TYPES = [
    // never compounds into a runaway speed over multiple pulses
    if(g.t-(b.state.homingAt||0)>=1){
      b.state.homingAt=g.t;
-     const spd=b.speedLock||b.baseSpeed||95;
+     const spd=b.speedLock||Math.hypot(b.vx,b.vy)||b.baseSpeed||95;
      const ang=Math.atan2(other.y-b.y,other.x-b.x);
      b.vx=Math.cos(ang)*spd; b.vy=Math.sin(ang)*spd;
      lockSpeed(b,spd);
@@ -1463,6 +1575,307 @@ const BALL_TYPES = [
      ctx.restore();
    }
  }},
+
+{id:'clock', name:'Clock Ball', group:'special', icon:'⏰', hp:95, speed:100, dmg:8, color:'#c9a227', collidePriority:1,
+ descSimple:'Cứ 2 lần va chạm là NGƯNG ĐỌNG THỜI GIAN toàn trận trong 1 giây: mọi thứ (kể cả đồng hồ đếm giờ của mọi kỹ năng) đứng yên, đồng hồ khổng lồ xoay giữa màn hình; chỉ Clock Ball tung ~20 cú đấm liên hoàn vào đối thủ, dứt đòn hất văng.',
+ desc:'Thân mang mặt đồng hồ với kim giờ/kim phút quay chậm đều đặn suốt trận. Cứ đúng mỗi 2 lần va chạm với đối thủ, lần va thứ 2 sẽ kích hoạt \"Ngưng Đọng Thời Gian\" trong 1 giây: TOÀN BỘ dòng thời gian của trận đấu dừng lại — mọi quả bóng, đạn, bẫy, bom, tàu, lốc xoáy, tường di động và cả các bộ đếm hồi chiêu / thời gian hiệu lực của mọi kỹ năng (ví dụ chu kỳ hoá sói của Werewolf Ball) đều đứng yên tuyệt đối, rồi chạy tiếp đúng từ chỗ đã dừng sau 1 giây — không bị hụt, không bị cộng dồn trễ. Trên màn hình hiện một chiếc đồng hồ khổng lồ xoay tròn cùng hiệu ứng đảo màu để báo hiệu thời gian đang ngừng. Trong khoảng đó chỉ Clock Ball hoạt động: bản thân miễn toàn bộ sát thương và mọi sát thương gây ra được nhân đôi; Clock Ball đứng yên tại chỗ và tung liên tục khoảng 20 cú đấm liên hoàn (\"muda muda\") vào đối thủ, kèm vệt mờ, tia va chạm và đường tập trung quanh nạn nhân. Đối thủ bị đóng băng đứng yên tuyệt đối VÀ mất hoàn toàn năng lực đặc biệt (kỹ năng, hiệu ứng bị động), xuyên thủng mọi miễn nhiễm khống chế đang có sẵn (ví dụ Florentino Ball đang lướt/múa vẫn bị khoá cứng). Mỗi cú chỉ gây một lượng sát thương rất nhỏ. Ngay khoảnh khắc thời gian chạy lại, một cú đấm chốt hạ (\"ORA!\") hất văng đối thủ ra xa kèm thêm một đòn sát thương vừa phải — bất chấp mọi miễn nhiễm đẩy lùi; lực hất chỉ là một xung tạm thời rồi giảm dần về tốc độ vốn có của đối thủ, không làm đối thủ chạy nhanh vĩnh viễn.',
+ init:(b)=>{
+   b.state.clockHitCount=0;     // counts ball-ball collisions since the last proc; fires on the 2nd
+   b.state.clockTriggerFx=-99;  // effect-clock time of the last trigger (drives the trigger ring)
+   b.state.barrageTarget=null;  // opponent locked in the muda-muda barrage
+   b.state.barrageNext=0;       // time-stop-elapsed at which the next punch is thrown
+   b.state.barragePunches=[];
+   b.state.barrageCount=0;      // punches thrown in the current barrage (drives fist side + damage-number batching)
+   b.state.barrageAcc=0;        // damage accumulated since the last floating number
+   b.state.barrageFinish=null;  // finishing-blow animation record
+ },
+ // The time-stop itself lives in the engine (GameEngine.startTimeStop): game
+ // time is frozen for everyone and only the hooks below keep running.
+ modifyIncoming:(b,attacker,dmg,g,source)=>{ if(g.isTimeStopOwner(b)) return 0; return dmg; },
+ modifyOutgoing:(b,other,dmg,g,source)=>{ if(g.isTimeStopOwner(b)) return dmg*2; return dmg; },
+ onBallCollide:(b,other,g)=>{
+   if(g.timeStop) return; // never re-count / re-trigger while time is already stopped
+   b.state.clockHitCount=(b.state.clockHitCount||0)+1;
+   if(b.state.clockHitCount<2) return; // deterministic: fires on every 2nd collision, no RNG
+   b.state.clockHitCount=0;
+   g.startTimeStop(b,other,CLOCK_STOP_DURATION);
+ },
+ onTimeStopStart:(b,other,g,ts)=>{
+   b.state.clockTriggerFx=g.fxT;
+   b.state.barrageTarget=other;
+   b.state.barrageNext=0;      // first punch lands on the very first stopped frame
+   b.state.barragePunches=[];
+   b.state.barrageCount=0;
+   b.state.barrageAcc=0;
+   b.state.barrageFinish=null;
+   spawnFloatText(g,other.x,other.y-40,'ĐÓNG BĂNG!','#7dd3fc');
+   spawnParticles(g,other.x,other.y,14,{color:'#7dd3fc',type:'glow',speed:80,life:ts.dur+0.1});
+   spawnFloatText(g,b.x,b.y-40,'⏰ THE WORLD!','#38bdf8');
+   spawnParticles(g,b.x,b.y,24,{color:'#38bdf8',type:'glow',speed:200,life:0.5});
+   spawnParticles(g,b.x,b.y,10,{color:'#ffffff',type:'spark',speed:260,life:0.35});
+   g.triggerShake(4,0.15);
+ },
+ // Rapid "muda muda" ticks: ~20 tiny punches across the stop. Punch timing is
+ // driven by the stop's own elapsed time (a fixed step, so the rate can't drift
+ // with frame timing) and capped per frame so a lag spike can't dump a burst.
+ onTimeStopTick:(b,target,g,ts)=>{
+   if(!target.alive) return;
+   let guard=0;
+   while(b.state.barrageNext<=ts.elapsed && b.state.barrageCount<CLOCK_PUNCH_MAX && guard++<3){
+     b.state.barrageNext+=CLOCK_PUNCH_INTERVAL;
+     let punchDmg=dmgFor(b,CLOCK_PUNCH_BASE_DMG);
+     punchDmg=b.def.modifyOutgoing(b,target,punchDmg,g,'barrage'); // applies the x2 time-stop multiplier
+     target.hp=Math.max(0,target.hp-punchDmg);
+     b.state.barrageAcc=(b.state.barrageAcc||0)+punchDmg;
+     b.state.barrageCount=(b.state.barrageCount||0)+1;
+     // one floating number per 4 punches (sum of them) instead of 20 tiny "-1"s
+     if(b.state.barrageCount%4===0){
+       spawnFloatText(g,target.x+rand(-16,16),target.y-30+rand(-10,6),'-'+Math.max(1,Math.round(b.state.barrageAcc)),'#ffe066');
+       b.state.barrageAcc=0;
+     }
+     // where on the victim this fist lands + which hand throws it
+     const rr=target.radius*0.5*Math.sqrt(Math.random()), aa=rand(0,Math.PI*2);
+     b.state.barragePunches=(b.state.barragePunches||[]).filter(p=>g.fxT-p.born<CLOCK_PUNCH_LIFE);
+     b.state.barragePunches.push({
+       born:g.fxT,
+       side:(b.state.barrageCount%2===0)?1:-1,       // alternate left/right hand
+       ox:Math.cos(aa)*rr, oy:Math.sin(aa)*rr,
+       ang:rand(-0.35,0.35)                          // slight fist tilt
+     });
+     spawnParticles(g,target.x+Math.cos(aa)*rr,target.y+Math.sin(aa)*rr,3,{color:'#ffffff',type:'spark',speed:210,life:0.16});
+     g.triggerShake(0.8,0.05);
+   }
+ },
+ // time resumes: one finishing blow, knocked away + a solid hit, bypassing any
+ // immunity on purpose (ignoreImmune=true). Runs even if the Clock Ball got
+ // powerless in the meantime - it belongs to the stop, not to the ball's kit.
+ onTimeStopEnd:(b,target,g,ts)=>{
+   // flush any damage number still waiting to be shown
+   if((b.state.barrageAcc||0)>=1 && target.alive){
+     spawnFloatText(g,target.x+rand(-16,16),target.y-30,'-'+Math.round(b.state.barrageAcc),'#ffe066');
+   }
+   b.state.barrageAcc=0;
+   if(!target.alive || target.hp<=0) return; // already dead: the engine ends the match this frame
+   const ang=Math.atan2(target.y-b.y,target.x-b.x)||rand(0,Math.PI*2);
+   const finishDmg=dmgFor(b,CLOCK_FINISH_BASE_DMG);
+   target.hp=Math.max(0,target.hp-finishDmg);
+   // a temporary shove that fades away on its own (see applyImpulse): the victim's
+   // own velocity / speed lock are never touched, so it can't end up permanently
+   // faster - not even for kits that re-lock their speed (Ghost, Shooting, Axe...)
+   applyImpulse(target,ang,CLOCK_FINISH_KNOCKBACK);
+   b.state.barrageFinish={born:g.fxT, dir:ang, tx:target.x, ty:target.y, bx:b.x, by:b.y};
+   spawnFloatText(g,target.x,target.y-44,'-'+finishDmg.toFixed(0),'#ef4444');
+   spawnFloatText(g,target.x,target.y-62,'ORA!','#38bdf8');
+   spawnParticles(g,target.x,target.y,22,{color:'#ffffff',type:'spark',speed:330,life:0.4});
+   spawnParticles(g,target.x,target.y,10,{color:'#38bdf8',type:'glow',speed:180,life:0.4});
+   g.triggerShake(5,0.18);
+ },
+ renderExtra:(b,g,ctx)=>{
+   const R=b.radius;
+   const inStop=g.isTimeStopOwner(b);
+   ctx.save();
+   if(inStop){ ctx.shadowColor='#38bdf8'; ctx.shadowBlur=10; }
+   ctx.strokeStyle= inStop? '#38bdf8' : 'rgba(255,255,255,0.55)';
+   ctx.lineWidth=1.6;
+   ctx.beginPath(); ctx.arc(b.x,b.y,R*0.68,0,Math.PI*2); ctx.stroke();
+   for(let i=0;i<12;i++){
+     const a2=i/12*Math.PI*2;
+     ctx.beginPath();
+     ctx.moveTo(b.x+Math.cos(a2)*R*0.68,b.y+Math.sin(a2)*R*0.68);
+     ctx.lineTo(b.x+Math.cos(a2)*R*0.58,b.y+Math.sin(a2)*R*0.58);
+     ctx.stroke();
+   }
+   // idle: hands drift slowly with game time. During its own stop the Clock
+   // Ball is the only thing still moving through time, so its hands spin fast
+   // on the effect clock (game time itself is frozen right now).
+   const minAng = inStop ? g.fxT*16 : g.t*1.6;
+   const hourAng = inStop ? g.fxT*3.2 : g.t*0.4;
+   ctx.strokeStyle= inStop? '#ffffff' : 'rgba(255,255,255,0.75)';
+   ctx.lineWidth= inStop? 2.6 : 1.6;
+   ctx.beginPath(); ctx.moveTo(b.x,b.y); ctx.lineTo(b.x+Math.cos(minAng)*R*0.5,b.y+Math.sin(minAng)*R*0.5); ctx.stroke();
+   ctx.beginPath(); ctx.moveTo(b.x,b.y); ctx.lineTo(b.x+Math.cos(hourAng)*R*0.32,b.y+Math.sin(hourAng)*R*0.32); ctx.stroke();
+   ctx.restore();
+   const age=g.fxT-(b.state.clockTriggerFx||-99);
+   if(age<0.4){
+     const t=age/0.4;
+     ctx.save();
+     ctx.globalAlpha=1-t;
+     ctx.strokeStyle='#38bdf8'; ctx.lineWidth=2.4;
+     ctx.beginPath(); ctx.arc(b.x,b.y,R*0.8+t*38,0,Math.PI*2); ctx.stroke();
+     ctx.restore();
+   }
+ },
+ // drawn in a second pass ABOVE both ball bodies: the muda-muda fists, focus
+ // lines around the victim, the time-left ring and the finishing \"ORA\" punch.
+ // All animation runs on the effect clock (g.fxT) - game time is frozen here.
+ renderTop:(b,g,ctx)=>{
+   const ts=(g.timeStop && g.timeStop.owner===b) ? g.timeStop : null;
+   const active=!!ts;
+   const punches=(b.state.barragePunches||[]).filter(p=>g.fxT-p.born<CLOCK_PUNCH_LIFE);
+   const fin=b.state.barrageFinish;
+   const finAge=fin? g.fxT-fin.born : 99;
+   if(!active && !punches.length && finAge>=CLOCK_FINISH_ANIM) return;
+   const R=b.radius;
+   const target=b.state.barrageTarget;
+   const hr=(n)=>{ const v=Math.sin(n*127.1+311.7)*43758.5453; return v-Math.floor(v); };
+   ctx.save();
+   ctx.lineCap='round'; ctx.lineJoin='round';
+
+   if(active){
+     // time-left ring, trembling slightly like the body is straining
+     const rem=clamp(1-ts.elapsed/ts.dur,0,1);
+     const jx=(hr(Math.floor(g.fxT*40))-0.5)*2.5, jy=(hr(Math.floor(g.fxT*40)+9)-0.5)*2.5;
+     ctx.shadowColor='#38bdf8'; ctx.shadowBlur=12;
+     ctx.strokeStyle='#38bdf8'; ctx.lineWidth=3;
+     ctx.beginPath(); ctx.arc(b.x+jx,b.y+jy,R+8,-Math.PI/2,-Math.PI/2+rem*Math.PI*2); ctx.stroke();
+     ctx.shadowBlur=0;
+
+     // manga-style focus lines radiating off the frozen victim
+     if(target && target.alive){
+       const seed=Math.floor(g.fxT*26);
+       ctx.strokeStyle='rgba(255,255,255,0.8)'; ctx.lineWidth=1.5;
+       for(let i=0;i<16;i++){
+         const a=hr(seed*17+i)*Math.PI*2;
+         const r0=target.radius*1.15+hr(seed*5+i)*8;
+         const r1=r0+10+hr(seed*11+i)*18;
+         ctx.beginPath();
+         ctx.moveTo(target.x+Math.cos(a)*r0,target.y+Math.sin(a)*r0);
+         ctx.lineTo(target.x+Math.cos(a)*r1,target.y+Math.sin(a)*r1);
+         ctx.stroke();
+       }
+     }
+
+     // comic \"MUDA\" lettering that jitters above the puncher
+     const words=['MUDA!','MUDA MUDA!','MUDA!!!'];
+     const w=words[Math.floor(g.fxT*14)%3];
+     ctx.save();
+     ctx.translate(b.x+jx*2,b.y+R+22+jy*2); // below the ball so it doesn't cover the floating 'THE WORLD!' text
+     ctx.rotate(-0.12+(hr(Math.floor(g.fxT*14))-0.5)*0.2);
+     ctx.font='italic 900 '+(15+(Math.floor(g.fxT*28)%2)*3)+'px \"Arial Black\",Impact,sans-serif';
+     ctx.textAlign='center'; ctx.textBaseline='middle';
+     ctx.lineWidth=4; ctx.strokeStyle='#0c4a6e'; ctx.strokeText(w,0,0);
+     ctx.fillStyle='#e0f2fe'; ctx.fillText(w,0,0);
+     ctx.restore();
+   }
+
+   // ---- the flurry of fists -------------------------------------------------
+   if(target){
+     const dir=Math.atan2(target.y-b.y,target.x-b.x);
+     const px=Math.cos(dir+Math.PI/2), py=Math.sin(dir+Math.PI/2);
+     for(const p of punches){
+       const t=clamp((g.fxT-p.born)/CLOCK_PUNCH_LIFE,0,1);
+       // snap out fast (ease-out) for the first 40%, then pull back
+       const ext = t<0.4 ? 1-Math.pow(1-t/0.4,2) : 1-(t-0.4)/0.6;
+       const sx=b.x+Math.cos(dir)*R*0.25+px*p.side*R*0.55;
+       const sy=b.y+Math.sin(dir)*R*0.25+py*p.side*R*0.55;
+       const ex=target.x+p.ox-Math.cos(dir)*target.radius*0.1;
+       const ey=target.y+p.oy-Math.sin(dir)*target.radius*0.1;
+       // afterimages (motion trail) - older ghosts fainter and further back
+       for(let k=3;k>=0;k--){
+         const e2=Math.max(0,ext-k*0.14);
+         const fx=sx+(ex-sx)*e2, fy=sy+(ey-sy)*e2;
+         drawClockFist(ctx,sx,sy,fx,fy,dir+p.ang,R*0.4,k===0?1:0.28/k,k===0);
+       }
+       // impact burst where the fist lands (peaks just after full extension)
+       if(t>0.3 && t<1){
+         const i=(t-0.3)/0.7;
+         ctx.save();
+         ctx.globalAlpha=1-i;
+         ctx.strokeStyle='#ffe066'; ctx.lineWidth=2;
+         const cx=ex, cy=ey, r0=3+i*6, r1=8+i*18;
+         for(let s2=0;s2<6;s2++){
+           const a=s2/6*Math.PI*2+p.born*9;
+           ctx.beginPath();
+           ctx.moveTo(cx+Math.cos(a)*r0,cy+Math.sin(a)*r0);
+           ctx.lineTo(cx+Math.cos(a)*r1,cy+Math.sin(a)*r1);
+           ctx.stroke();
+         }
+         ctx.strokeStyle='#ffffff'; ctx.lineWidth=1.5;
+         ctx.beginPath(); ctx.arc(cx,cy,4+i*14,0,Math.PI*2); ctx.stroke();
+         ctx.restore();
+       }
+     }
+   }
+
+   // ---- finishing blow: one big fist + shockwave ---------------------------
+   if(fin && finAge<CLOCK_FINISH_ANIM){
+     const t=finAge/CLOCK_FINISH_ANIM;
+     const ext=t<0.35? 1-Math.pow(1-t/0.35,3) : 1-(t-0.35)/0.65*0.6;
+     const sx=fin.bx+Math.cos(fin.dir)*R*0.3, sy=fin.by+Math.sin(fin.dir)*R*0.3;
+     const ex=fin.tx-Math.cos(fin.dir)*R*0.2, ey=fin.ty-Math.sin(fin.dir)*R*0.2;
+     const fx=sx+(ex-sx)*ext, fy=sy+(ey-sy)*ext;
+     for(let k=4;k>=0;k--){
+       const e2=Math.max(0,ext-k*0.12);
+       drawClockFist(ctx,sx,sy,sx+(ex-sx)*e2,sy+(ey-sy)*e2,fin.dir,R*0.62,k===0?1:0.3/k,k===0);
+     }
+     if(t>0.25){
+       const i=(t-0.25)/0.75;
+       ctx.globalAlpha=1-i;
+       ctx.strokeStyle='#ffffff'; ctx.lineWidth=4*(1-i)+1;
+       ctx.beginPath(); ctx.arc(ex,ey,10+i*46,0,Math.PI*2); ctx.stroke();
+       ctx.strokeStyle='#38bdf8'; ctx.lineWidth=2.5;
+       ctx.beginPath(); ctx.arc(ex,ey,6+i*30,0,Math.PI*2); ctx.stroke();
+       ctx.strokeStyle='#ffe066'; ctx.lineWidth=3;
+       for(let s2=0;s2<10;s2++){
+         const a=s2/10*Math.PI*2;
+         ctx.beginPath();
+         ctx.moveTo(ex+Math.cos(a)*(12+i*10),ey+Math.sin(a)*(12+i*10));
+         ctx.lineTo(ex+Math.cos(a)*(22+i*36),ey+Math.sin(a)*(22+i*36));
+         ctx.stroke();
+       }
+     }
+   }
+   ctx.restore();
+ }},
+
+{id:'leaf', name:'Leaf Ball', group:'special', icon:'🍃', hp:90, speed:100, dmg:7, color:'#6fbf3f',
+ descSimple:'Định kỳ hoặc khi va chạm sẽ tan thành lốc lá bay tới điểm ngẫu nhiên, rải lá gây sát thương dọc đường; lá còn nằm lại thêm một lúc.',
+ desc:'Cứ mỗi 3 giây, hoặc ngay khi va chạm với đối thủ, Leaf Ball tan thành một cơn lốc lá (thân mờ đi) và bay thẳng tới một vị trí ngẫu nhiên trên map trong tối đa 1.4 giây. Trong lúc bay, liên tục rải lại những chiếc lá dọc đường đi — mỗi chiếc lá là một vùng sát thương nhỏ, gây 5 sát thương mỗi lần chạm và còn tồn tại thêm khoảng 1.4 giây sau khi rơi xuống, tức là vẫn nằm lại một lúc sau khi ball đã bay xong và hiện nguyên hình trở lại. Khi tới nơi (hoặc hết thời gian bay), ball tái hợp thành hình tròn bình thường tại điểm đến và bắt đầu đếm lại 3 giây cho lượt phân tán kế tiếp.',
+ init:(b)=>{ b.state.leafPhase='idle'; b.state.leafCD=0; b.state.leafTimer=0; b.state.leafTarget=null; b.state.leafDropCD=0; b.bodyAlphaOverride=1; },
+ onBallCollide:(b,other,g)=>{ if(b.state.leafPhase==='idle') startLeafScatter(b,g); },
+ update:(b,dt,g)=>{
+   if(b.state.leafPhase==='idle'){
+     if(g.t-(b.state.leafCD||0)>=3) startLeafScatter(b,g);
+     return;
+   }
+   const tgt=b.state.leafTarget;
+   const d=dist(b.x,b.y,tgt.x,tgt.y);
+   if(d>12 && b.state.leafTimer<1.4){
+     const spd=b.speedLock||Math.hypot(b.vx,b.vy)||b.baseSpeed||100;
+     const ang=Math.atan2(tgt.y-b.y,tgt.x-b.x);
+     b.vx=Math.cos(ang)*spd; b.vy=Math.sin(ang)*spd;
+     lockSpeed(b,spd);
+   }
+   b.state.leafTimer+=dt;
+   if(g.t-(b.state.leafDropCD||0)>=0.1){
+     b.state.leafDropCD=g.t;
+     spawnHazard(g,{type:'leafpatch', x:b.x, y:b.y, r:15, until:g.t+1.4, owner:b, dmg:5});
+     spawnParticles(g,b.x,b.y,3,{color:'#8fd95f',type:'dust',speed:50,life:0.4});
+   }
+   if(d<=12 || b.state.leafTimer>=1.4){
+     b.state.leafPhase='idle';
+     b.state.leafCD=g.t;
+     b.bodyAlphaOverride=1;
+     spawnParticles(g,b.x,b.y,14,{color:'#6fbf3f',type:'glow',speed:120,life:0.4});
+   }
+ },
+ renderExtra:(b,g,ctx)=>{
+   if(b.state.leafPhase!=='scatter') return;
+   const R=b.radius;
+   const ang=Math.atan2(b.vy,b.vx);
+   for(let i=0;i<5;i++){
+     const off=g.t*6+i*(Math.PI*2/5);
+     const rr=R*0.9+Math.sin(g.t*4+i)*4;
+     const lx=b.x+Math.cos(off)*rr, ly=b.y+Math.sin(off)*rr;
+     ctx.save();
+     ctx.translate(lx,ly); ctx.rotate(off+ang);
+     ctx.fillStyle= i%2? '#6fbf3f':'#8fd95f';
+     ctx.beginPath();
+     ctx.moveTo(0,-5); ctx.quadraticCurveTo(4,0,0,5); ctx.quadraticCurveTo(-4,0,0,-5);
+     ctx.closePath(); ctx.fill();
+     ctx.restore();
+   }
+ }},
 ];
 
 // Every ball keeps the same plain circle silhouette - identity now comes
@@ -1472,3 +1885,51 @@ const BALL_TYPES = [
 BALL_TYPES.forEach((bt)=>{ bt.shape='circle'; });
 
 function dmgFor(ball, base){ return base * (ball.dmg/7); }
+
+// ---- Werewolf Ball form cycle -------------------------------------------
+const WEREWOLF_FORM_SECONDS=12;    // seconds spent in EACH form (human -> wolf -> human ...), in game time
+
+// ---- Clock Ball time-stop barrage tuning --------------------------------
+// (before: 14 punches x dmgFor(1.6) x2 = ~51 dmg + finisher dmgFor(15) = ~17
+//  -> ~68 total.  now: ~20 punches x dmgFor(0.45) x2 = ~21 + finisher
+//  dmgFor(8) = ~9  -> ~30 total.)
+const CLOCK_STOP_DURATION=1.0;     // seconds of REAL time the whole world is stopped for
+const CLOCK_PUNCH_MAX=20;          // hard cap on punches per stop
+const CLOCK_FINISH_KNOCKBACK=470;  // initial shove of the finishing "ORA" blow (fades out by itself)
+const CLOCK_PUNCH_INTERVAL=0.05;   // seconds between punches (~20 per 1s stop)
+const CLOCK_PUNCH_BASE_DMG=0.45;   // per-punch base damage (before the x2 time-stop bonus)
+const CLOCK_FINISH_BASE_DMG=8;     // finishing "ORA" blow base damage
+const CLOCK_PUNCH_LIFE=0.16;       // lifetime of one punch animation
+const CLOCK_FINISH_ANIM=0.32;      // lifetime of the finishing punch animation
+
+// A fist on an arm: (sx,sy) = shoulder, (fx,fy) = fist centre, dir = punch heading.
+// Cyan "stand" energy arm + a white/cyan fist with 4 knuckle dots.
+function drawClockFist(ctx,sx,sy,fx,fy,dir,r,alpha,withArm){
+  ctx.save();
+  ctx.globalAlpha=alpha;
+  if(withArm){
+    ctx.strokeStyle='rgba(56,189,248,0.55)'; ctx.lineWidth=r*0.9;
+    ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(fx,fy); ctx.stroke();
+    ctx.strokeStyle='rgba(255,255,255,0.7)'; ctx.lineWidth=r*0.3;
+    ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(fx,fy); ctx.stroke();
+  }
+  ctx.shadowColor='#38bdf8'; ctx.shadowBlur=withArm?10:0;
+  const g=ctx.createRadialGradient(fx-r*0.3,fy-r*0.3,r*0.1,fx,fy,r);
+  g.addColorStop(0,'#ffffff'); g.addColorStop(1,'#7dd3fc');
+  ctx.fillStyle=g;
+  ctx.beginPath(); ctx.arc(fx,fy,r,0,Math.PI*2); ctx.fill();
+  ctx.shadowBlur=0;
+  ctx.lineWidth=Math.max(1.2,r*0.14); ctx.strokeStyle='#0369a1';
+  ctx.beginPath(); ctx.arc(fx,fy,r,0,Math.PI*2); ctx.stroke();
+  if(withArm){
+    // knuckles across the front of the fist
+    const ux=Math.cos(dir), uy=Math.sin(dir), vx=-uy, vy=ux;
+    ctx.fillStyle='#0369a1';
+    for(let i=-1.5;i<=1.5;i++){
+      ctx.beginPath();
+      ctx.arc(fx+ux*r*0.55+vx*i*r*0.42, fy+uy*r*0.55+vy*i*r*0.42, r*0.13, 0, Math.PI*2);
+      ctx.fill();
+    }
+  }
+  ctx.restore();
+}

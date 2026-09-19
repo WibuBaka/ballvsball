@@ -96,7 +96,14 @@ function enforceSpeedLock(ball, mult){
 // "Powerless" status (Powerless Ball effect): while active, a ball's own
 // kit (update/onWallHit/onBallCollide/getMods/onPortal/onDeath/modify*) is
 // fully suppressed - it fights as a plain ball with no special ability.
-function powerOk(ball,g){ return g.t >= (ball.state.powerlessUntil||0); }
+// A ball that is the VICTIM of a Clock Ball time-stop is also powerless for the
+// whole stop (checked live off g.timeStop instead of writing a powerlessUntil
+// timestamp: game time is frozen during the stop, so a timestamp would leak
+// into the seconds AFTER time resumes).
+function powerOk(ball,g){
+  if(g.timeStop && g.timeStop.target===ball) return false;
+  return g.t >= (ball.state.powerlessUntil||0);
+}
 
 // "Vulnerable" status (Hook Ball effect): a flat damage-taken multiplier
 // applied on top of everything else, regardless of the victim's own kit.
@@ -114,20 +121,42 @@ function applyStunPenalty(attacker,dmg,g){
   return dmg;
 }
 
+// Potion Ball's Burn effect: while burning, a ball's own outgoing damage is
+// halved - on top of whatever its own kit and other penalties calculate.
+function applyBurnPenalty(attacker,dmg,g){
+  if(g.t < (attacker.state.potionBurnUntil||0)) return dmg*0.5;
+  return dmg;
+}
+
 // Knockback that respects CC immunity (Florentino Ball's ccImmune, etc.) -
 // use this instead of touching vx/vy on an opponent directly anywhere in
 // the game. additive=true adds to the ball's existing velocity (the usual
 // case for a hit); additive=false replaces it outright (Charge Ball's clean
 // launch). Returns false (and applies nothing) if the target is immune, so
 // callers can skip any side effects that only make sense once the knockback
-// actually lands.
-function applyKnockback(target,ang,force,additive){
-  if(target.state.ccImmune) return false;
+// actually lands. ignoreImmune=true skips the ccImmune check entirely - only
+// for effects explicitly meant to override every immunity (Clock Ball's
+// time-stop finisher), never use it for a normal hit.
+function applyKnockback(target,ang,force,additive,ignoreImmune){
+  if(target.state.ccImmune && !ignoreImmune) return false;
   if(additive){ target.vx+=Math.cos(ang)*force; target.vy+=Math.sin(ang)*force; }
   else { target.vx=Math.cos(ang)*force; target.vy=Math.sin(ang)*force; }
   clampBallSpeed(target);
   lockSpeed(target, Math.hypot(target.vx,target.vy));
   return true;
+}
+
+// Temporary shove that is deliberately kept OUT of the ball's own velocity and
+// speed lock (Clock Ball's finishing "ORA" punch). applyKnockback() rewrites
+// vx/vy and then re-locks the ball's speed at the boosted value, and many
+// kits (Ghost, Shooting, Axe, Florentino...) also re-lock "whatever my
+// current speed is" - so a big knockback ended up as a PERMANENT speed-up.
+// An impulse is a separate displacement velocity that decays away by itself
+// (see GameEngine's ball step) and never touches vx/vy/speedLock, so it can't
+// leak into any other ball's speed logic. Ignores CC immunity by design.
+function applyImpulse(target,ang,force){
+  const imp=target.state.impulse||(target.state.impulse={vx:0,vy:0});
+  imp.vx+=Math.cos(ang)*force; imp.vy+=Math.sin(ang)*force;
 }
 
 // Flat, minimal shape drawing for balls - each ball type gets its own body
