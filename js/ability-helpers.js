@@ -253,7 +253,7 @@ function applyHazardEffect(hz,ball,g,dt){
       if(g.t-(hz.lastHit[p]||0)>0.5){
         hz.lastHit[p]=g.t;
         if(skillDodge(ball,g)) break;
-        const dmg=dmgFor(hz.owner,7);
+        const dmg=5; // flat 5 dmg per 0.5s tick (was dmgFor(owner,7) = 6)
         ball.hp=Math.max(0,ball.hp-dmg);
         spawnFloatText(g,ball.x,ball.y-30,'-'+dmg.toFixed(0),'#ff3b5c');
       }

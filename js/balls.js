@@ -297,26 +297,32 @@ const BALL_TYPES = [
    ctx.save();
    ctx.translate(b.x,b.y); ctx.rotate(aimAng);
    const R=b.radius+15;
-   const tip1={x:-R*0.25,y:-R*0.85}, tip2={x:-R*0.25,y:R*0.85};
-   const belly={x:-R*1.1,y:0};
+   // The bow is held IN FRONT of the ball (toward the target, +x). Its belly bulges toward the
+   // target, the limb tips point back at the archer, and drawing pulls the string BACK toward
+   // the ball (-x) while the limbs flex inward. (It used to be mirrored: bow behind the ball,
+   // string pulled further away from the target.)
+   const tipX=R*0.45-t*R*0.14, tipY=R*0.85-t*R*0.06;
+   const tip1={x:tipX,y:-tipY}, tip2={x:tipX,y:tipY};
+   const belly={x:R*1.35,y:0};
    // bow limbs
    ctx.beginPath();
    ctx.moveTo(tip1.x,tip1.y);
    ctx.quadraticCurveTo(belly.x,belly.y,tip2.x,tip2.y);
    ctx.strokeStyle='#7a5230'; ctx.lineWidth=3.5; ctx.lineCap='round'; ctx.stroke();
-   // string, pulled back further as the draw progresses
-   const nockX=-R*0.25-t*R*0.75;
+   // string, pulled back toward the archer as the draw progresses
+   const nockX=tipX-t*R*0.75;
    ctx.beginPath();
    ctx.moveTo(tip1.x,tip1.y);
    ctx.lineTo(nockX,0);
    ctx.lineTo(tip2.x,tip2.y);
    ctx.strokeStyle='#e8d8b0'; ctx.lineWidth=1.6; ctx.stroke();
    // nocked arrow: shaft + head, sitting on the string, pointing at the target
+   const headX=R*1.05;
    ctx.beginPath();
-   ctx.moveTo(nockX,0); ctx.lineTo(R*0.9,0);
+   ctx.moveTo(nockX,0); ctx.lineTo(headX,0);
    ctx.strokeStyle='#9dffb0'; ctx.lineWidth=2; ctx.stroke();
    ctx.beginPath();
-   ctx.moveTo(R*0.9,0); ctx.lineTo(R*0.62,-5); ctx.lineTo(R*0.62,5); ctx.closePath();
+   ctx.moveTo(headX,0); ctx.lineTo(headX-R*0.28,-5); ctx.lineTo(headX-R*0.28,5); ctx.closePath();
    ctx.fillStyle='#9dffb0'; ctx.fill();
    // charge glow that brightens right before release
    ctx.beginPath(); ctx.arc(0,0,b.radius+6,0,Math.PI*2);
@@ -951,8 +957,8 @@ const BALL_TYPES = [
    }
  }},
 {id:'range', name:'Range Ball', group:'dps', icon:'🌐', hp:110, speed:70, dmg:6, color:'#4fb0c9',
- descSimple:'Tạo một vòng năng lượng quanh bản thân, mở rộng dần theo thời gian (có giới hạn); ai đứng bên trong sẽ bị bào mòn máu.',
- desc:'Tạo vòng năng lượng bao quanh bản thân, mở rộng dần theo thời gian nhưng bị giới hạn tối đa chỉ bao phủ khoảng 65% sân đấu, bào mòn máu ai đứng bên trong.',
+ descSimple:'Tạo một vòng năng lượng quanh bản thân, mở rộng dần theo thời gian (có giới hạn); ai đứng bên trong sẽ bị bào mòn máu — càng đứng gần càng đau (5 sát thương khi sát bên, còn 2 ở rìa vòng).',
+ desc:'Tạo vòng năng lượng bao quanh bản thân, mở rộng dần theo thời gian nhưng bị giới hạn tối đa chỉ bao phủ khoảng 65% sân đấu, bào mòn máu ai đứng bên trong mỗi 0.5 giây. Sát thương phụ thuộc khoảng cách: càng gần Range Ball càng cao, tối đa 5 khi sát bên (chạm nhau) và giảm dần còn 2 ở rìa vòng.',
  init:(b)=>{ b.state.auraTimer=0; },
  update:(b,dt,g)=>{
    b.state.auraTimer+=dt;
@@ -963,19 +969,27 @@ const BALL_TYPES = [
    if(other && dist(b.x,b.y,other.x,other.y)<radius && g.t-(b.state.auraTickCD||0)>0.5){
      b.state.auraTickCD=g.t;
      if(skillDodge(other,g)) return;
-     const dmg=dmgFor(b,4);
+     // proximity scaling: 5 dmg when touching (centre distance <= sum of radii) fading
+     // linearly to 2 dmg at the aura's outer edge
+     const contact=b.radius+other.radius;
+     const closeness=clamp((radius-dist(b.x,b.y,other.x,other.y))/Math.max(1,radius-contact),0,1);
+     const dmg=2+3*closeness;
      other.hp=Math.max(0,other.hp-dmg);
-     spawnFloatText(g,other.x,other.y-30,'-'+dmg.toFixed(0),'#ffcb3d');
+     spawnFloatText(g,other.x,other.y-30,'-'+(Math.round(dmg*10)/10),'#ffcb3d');
    }
  },
  renderExtra:(b,g,ctx)=>{
    const r=b.state.auraRadius||0; if(r<=0) return;
+   // faint gradient: hotter toward the centre, matching the "closer = more damage" rule
+   const grad=ctx.createRadialGradient(b.x,b.y,0,b.x,b.y,r);
+   grad.addColorStop(0,'rgba(255,203,61,0.20)'); grad.addColorStop(1,'rgba(255,203,61,0.03)');
    ctx.beginPath(); ctx.arc(b.x,b.y,r,0,Math.PI*2);
+   ctx.fillStyle=grad; ctx.fill();
    ctx.strokeStyle='rgba(255,203,61,0.45)'; ctx.lineWidth=2; ctx.stroke();
  }},
 {id:'zone', name:'Zone Ball', group:'control', icon:'🟥', hp:120, speed:55, dmg:6, color:'#c0392b',
- descSimple:'Tạo ra các ô vuông tử địa rải rác trên sân đấu — càng mất nhiều máu càng có thêm ô mới; lọt vào ô sẽ chịu sát thương rất nặng.',
- desc:'Ngay khi vào trận đã tự tạo sẵn 1 ô vuông tử địa. Sau đó, cứ mỗi 20% HP bị mất, tạo thêm 1 ô vuông tử địa tại vị trí ngẫu nhiên trên sân đấu, gây sát thương cực nặng cho ai lọt vào trong.',
+ descSimple:'Tạo ra các ô vuông tử địa rải rác trên sân đấu — càng mất nhiều máu càng có thêm ô mới; lọt vào ô sẽ liên tục mất máu (5 sát thương mỗi 0.5s).',
+ desc:'Ngay khi vào trận đã tự tạo sẵn 1 ô vuông tử địa. Sau đó, cứ mỗi 20% HP bị mất, tạo thêm 1 ô vuông tử địa tại vị trí ngẫu nhiên trên sân đấu, gây 5 sát thương mỗi 0.5 giây cho ai lọt vào trong.',
  init:(b)=>{ b.state.thresholdsHit=0; b.state.startZoneDone=false; },
  update:(b,dt,g)=>{
    if(!b.state.startZoneDone){
@@ -996,13 +1010,13 @@ const BALL_TYPES = [
    }
  }},
 {id:'laser', name:'Laser Ball', group:'burst', icon:'🔴', hp:70, speed:120, dmg:11, color:'#ff4d4d',
- descSimple:'Ngay khi vào trận sẽ dựng 4 đường laser cố định dọc theo các cạnh sân đấu, tồn tại tới hết trận; chạm vào sẽ liên tục mất máu.',
- desc:'Ngay khi vào trận, dựng 4 đường laser cố định dọc theo 4 cạnh sân đấu, tồn tại vĩnh viễn tới hết trận. Chạm vào sẽ chịu sát thương liên tục.',
+ descSimple:'Ngay khi vào trận sẽ dựng 4 đường laser cố định dọc theo các cạnh sân đấu, tồn tại tới hết trận; chạm vào sẽ liên tục mất máu (6 sát thương mỗi 0.5s).',
+ desc:'Ngay khi vào trận, dựng 4 đường laser cố định dọc theo 4 cạnh sân đấu, tồn tại vĩnh viễn tới hết trận. Chạm vào sẽ chịu 6 sát thương mỗi 0.5 giây.',
  init:(b)=>{ b.state.lasersSpawned=false; },
  update:(b,dt,g)=>{
    if(!b.state.lasersSpawned){
      b.state.lasersSpawned=true;
-     const th=12, d=dmgFor(b,7);
+     const th=12, d=6; // flat 6 dmg per 0.5s tick (was dmgFor(b,7) = 11)
      spawnHazard(g,{type:'laser',x:0,y:0,w:g.w,h:th,until:Infinity,owner:b,rectType:true,dmg:d});
      spawnHazard(g,{type:'laser',x:0,y:g.h-th,w:g.w,h:th,until:Infinity,owner:b,rectType:true,dmg:d});
      spawnHazard(g,{type:'laser',x:0,y:0,w:th,h:g.h,until:Infinity,owner:b,rectType:true,dmg:d});
@@ -1013,7 +1027,7 @@ const BALL_TYPES = [
 // ==================== 🎁 NHÓM ĐẶC BIỆT & ĐỘC QUYỀN ====================
 {id:'bomb', name:'Bomb Ball', group:'burst', icon:'💣', hp:100, speed:100, dmg:14, color:'#4a4a4a',
  descSimple:'Định kỳ thả một quả bom hẹn giờ; sau vài giây bom phát nổ, gây sát thương diện rộng quanh vị trí nổ.',
- desc:'Cứ mỗi 1 giây thả một quả bom hẹn giờ (có hiện đếm ngược). Sau 5 giây, bom phát nổ gây sát thương diện rộng quanh vị trí quả bom, kèm hiệu ứng vòng nổ lan tỏa (phạm vi lớn hơn, nhưng vẫn không phải toàn map).',
+ desc:'Cứ mỗi 1 giây thả một quả bom hẹn giờ (có hiện đếm ngược). Sau 5 giây, bom phát nổ gây 18 sát thương diện rộng quanh vị trí quả bom, kèm hiệu ứng vòng nổ lan tỏa (phạm vi lớn hơn, nhưng vẫn không phải toàn map).',
  init:(b)=>{ b.state.bombCD=0; },
  update:(b,dt,g)=>{
    if(g.t-(b.state.bombCD||0)>1){

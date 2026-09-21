@@ -908,7 +908,7 @@ class GameEngine{
     for(const bomb of this.bombs){
       if(this.t>=bomb.at && !bomb.exploded){
         bomb.exploded=true;
-        explodeAt(this,bomb.x,bomb.y,bomb.owner,155,dmgFor(bomb.owner,10));
+        explodeAt(this,bomb.x,bomb.y,bomb.owner,155,dmgFor(bomb.owner,9)); // = 18 dmg at Bomb Ball's dmg stat of 14
       }
     }
     this.bombs=this.bombs.filter(bm=>!bm.exploded);
